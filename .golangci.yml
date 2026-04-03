@@ -1,0 +1,275 @@
+version: "2"
+
+linters:
+  default: none
+
+  exclusions:
+    generated: strict
+
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+
+    - asasalint
+    - asciicheck
+    - bidichk
+    - bodyclose
+    - canonicalheader
+    - containedctx
+    - contextcheck
+    - copyloopvar
+    - dogsled
+    - dupl
+    - durationcheck
+    - embeddedstructfieldcheck
+    - errchkjson
+    - errname
+    - errorlint
+    - exptostd
+    - fatcontext
+    - forcetypeassert
+    - funcorder
+    - gocheckcompilerdirectives
+    - gocritic
+    - goprintffuncname
+    - gosec
+    - importas
+    - inamedparam
+    - iotamixing
+    - loggercheck
+    - makezero
+    - mirror
+    - modernize
+    - musttag
+    - nilerr
+    - nilnesserr
+    - nilnil
+    - noctx
+    - nolintlint
+    - nosprintfhostport
+    - perfsprint
+    - prealloc
+    - predeclared
+    - reassign
+    - recvcheck
+    - tagalign
+    - testifylint
+    - thelper
+    - tparallel
+    - unconvert
+    - unqueryvet
+    - usestdlibvars
+    - usetesting
+    - wastedassign
+
+  settings:
+    dogsled:
+      max-blank-identifiers: 3
+
+    embeddedstructfieldcheck:
+      forbid-mutex: true
+
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+
+    errchkjson:
+      report-no-exported: true
+
+    funcorder:
+      constructor: true
+      struct-method: true
+
+    gocritic:
+      disable-all: true
+      enabled-checks:
+        - appendAssign
+        - appendCombine
+        - argOrder
+        - assignOp
+        - badCall
+        - badCond
+        - badLock
+        - badRegexp
+        - badSorting
+        - badSyncOnceFunc
+        - boolExprSimplify
+        - builtinShadow
+        - builtinShadowDecl
+        - captLocal
+        - caseOrder
+        - codegenComment
+        - defaultCaseOrder
+        - deferInLoop
+        - deferUnlambda
+        - deprecatedComment
+        - dupArg
+        - dupBranchBody
+        - dupCase
+        - dupImport
+        - dupOption
+        - dupSubExpr
+        - dynamicFmtString
+        - elseif
+        - emptyDecl
+        - emptyFallthrough
+        - emptyStringTest
+        - equalFold
+        - evalOrder
+        - exitAfterDefer
+        - exposedSyncMutex
+        - externalErrorReassign
+        - filepathJoin
+        - flagDeref
+        - flagName
+        - hexLiteral
+        - httpNoBody
+        - hugeParam
+        - ifElseChain
+        - importShadow
+        - indexAlloc
+        - initClause
+        - mapKey
+        - methodExprCall
+        - newDeref
+        - nilValReturn
+        - octalLiteral
+        - offBy1
+        - paramTypeCombine
+        - preferDecodeRune
+        - preferFilepathJoin
+        - preferFprint
+        - preferStringWriter
+        - preferWriteByte
+        - ptrToRefParam
+        - rangeAppendAll
+        - rangeExprCopy
+        - rangeValCopy
+        - redundantSprint
+        - regexpMust
+        - regexpPattern
+        - regexpSimplify
+        - returnAfterHttpError
+        - ruleguard
+        - singleCaseSwitch
+        - sliceClear
+        - sloppyLen
+        - sloppyReassign
+        - sloppyTypeAssert
+        - sortSlice
+        - sprintfQuotedString
+        - sqlQuery
+        - stringConcatSimplify
+        - stringXbytes
+        - stringsCompare
+        - switchTrue
+        - syncMapLoadAndDelete
+        - timeExprSimplify
+        - truncateCmp
+        - typeAssertChain
+        - typeDefFirst
+        - typeSwitchVar
+        - typeUnparen
+        - uncheckedInlineErr
+        - underef
+        - unlabelStmt
+        - unlambda
+        - unnecessaryBlock
+        - unnecessaryDefer
+        - unslice
+        - valSwap
+        - weakCond
+        - wrapperFunc
+        - yodaStyleExpr
+        - zeroByteRepeat
+      settings:
+        hugeParam:
+          sizeThreshold: 1024
+        ifElseChain:
+          minThreshold: 3
+        rangeExprCopy:
+          sizeThreshold: 1024
+        rangeValCopy:
+          sizeThreshold: 1024
+
+    govet:
+      disable-all: true
+      enable:
+        - appends
+        - asmdecl
+        - assign
+        - atomic
+        - atomicalign
+        - bools
+        - buildtag
+        - cgocall
+        - composites
+        - copylocks
+        - deepequalerrors
+        - defers
+        - directive
+        - errorsas
+        - framepointer
+        - hostport
+        - httpmux
+        - httpresponse
+        - ifaceassert
+        - loopclosure
+        - lostcancel
+        - nilfunc
+        - nilness
+        - printf
+        - reflectvaluecompare
+        - shadow
+        - shift
+        - sigchanyzer
+        - slog
+        - sortslice
+        - stdmethods
+        - stdversion
+        - stringintconv
+        - structtag
+        - testinggoroutine
+        - tests
+        - timeformat
+        - unmarshal
+        - unreachable
+        - unsafeptr
+        - unusedresult
+        - unusedwrite
+        - waitgroup
+
+    inamedparam:
+      skip-single-param: true
+
+    modernize:
+      disable:
+        - newexpr
+
+    nilnil:
+      detect-opposite: true
+
+    staticcheck:
+      checks:
+        - all
+        - -ST1000
+
+formatters:
+  enable:
+    - gofumpt
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+output:
+  sort-order:
+    - file
+
+run:
+  timeout: 10m
+  tests: true
+  modules-download-mode: readonly
