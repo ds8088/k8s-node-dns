@@ -627,7 +627,7 @@ func TestStartDNSBindError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("binding test listener: %v", err)
 	}
-	
+
 	t.Cleanup(func() {
 		closeErr := l.Close()
 		if closeErr != nil {
