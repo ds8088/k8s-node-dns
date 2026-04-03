@@ -43,7 +43,7 @@ jobs:
       - name: Run govulncheck
         uses: golang/govulncheck-action@31f7c5463448f83528bd771c2d978d940080c9fd
         with:
-          go-package: ./...
+          repo-checkout: false
 
       - name: Run linters
         uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20
@@ -81,7 +81,7 @@ jobs:
       - name: Log in to GHCR
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121
         with:
-          registry: https://ghcr.io
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
