@@ -42,7 +42,7 @@ func shouldRunIntegrationTests() bool {
 //
 // Use setup-envtest to populate a directory with binaries:
 //
-//	setup-envtest use -p path 1.35.3
+//	setup-envtest use -p path 1.34.1
 func TestMain(m *testing.M) {
 	exitCode := 0
 	defer func() {

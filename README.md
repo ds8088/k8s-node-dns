@@ -95,6 +95,6 @@ An integration test is also included, which runs the tool against a real Kuberne
 To enable it, install [`setup-envtest`](https://pkg.go.dev/sigs.k8s.io/controller-runtime/tools/setup-envtest) and run:
 
 ```sh
-export KUBEBUILDER_ASSETS=$(setup-envtest use -p path 1.35.3)
+export KUBEBUILDER_ASSETS=$(setup-envtest use -p path 1.34.1)
 RUN_INTEGRATION_TESTS=1 go test ./...
 ```
