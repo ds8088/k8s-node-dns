@@ -1,0 +1,106 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "k8s-node-dns.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "k8s-node-dns.labels" . | nindent 4 }}
+    app.kubernetes.io/version: {{ .Values.image.tag | default .Chart.AppVersion | quote }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "k8s-node-dns.selectorLabels" . | nindent 6 }}
+
+  template:
+    metadata:
+      labels:
+        {{- include "k8s-node-dns.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+          {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+    spec:
+      serviceAccountName: {{ include "k8s-node-dns.serviceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+
+      {{- if .Values.terminationGracePeriodSeconds }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- end }}
+
+      {{- if .Values.priorityClassName }}
+      priorityClassName: {{ .Values.priorityClassName | quote }}
+      {{- end }}
+
+      {{- if not (kindIs "invalid" .Values.hostUsers) }}
+      hostUsers: {{ .Values.hostUsers }}
+      {{- end }}
+
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      containers:
+        - name: k8s-node-dns
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --zone={{ required "config.zone is required" .Values.config.zone }}
+            - --soa-ns={{ required "config.soaNS is required" .Values.config.soaNS }}
+            - --soa-email={{ required "config.soaEmail is required" .Values.config.soaEmail }}
+            {{- if .Values.config.bind }}
+            - --bind={{ .Values.config.bind }}
+            {{- end }}
+            - --port={{ .Values.config.port }}
+            - --ttl={{ .Values.config.ttl }}
+            - --soa-refresh={{ .Values.config.soa.refresh }}
+            - --soa-retry={{ .Values.config.soa.retry }}
+            - --soa-expire={{ .Values.config.soa.expire }}
+            - --soa-ttl={{ .Values.config.soa.ttl }}
+            - --soa-neg-ttl={{ .Values.config.soa.negativeTTL }}
+            - --areas-annotation={{ .Values.config.areasAnnotation }}
+            - --ips-annotation={{ .Values.config.ipsAnnotation }}
+            {{- if .Values.config.leaderElect }}
+            - --leader-elect
+            {{- end }}
+          ports:
+            - name: dns-udp
+              containerPort: {{ .Values.config.port }}
+              protocol: UDP
+            - name: dns-tcp
+              containerPort: {{ .Values.config.port }}
+              protocol: TCP
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          livenessProbe:
+            tcpSocket:
+              port: {{ .Values.config.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - NET_BIND_SERVICE

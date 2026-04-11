@@ -1,0 +1,60 @@
+name: Helm
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - "v*"
+    paths:
+      - chart/**
+  pull_request:
+    branches:
+      - master
+    paths:
+      - chart/**
+
+jobs:
+  test:
+    name: Test chart
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Run helm-unittest
+        uses: d3adb5/helm-unittest-action@850bc76597579183998069830d5fa8c3ef0ea34a
+        with:
+          helm-version: v4.1.4
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  publish:
+    name: Publish chart
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Extract chart version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" > "$GITHUB_OUTPUT"
+
+      - name: Publish chart to GHCR
+        uses: appany/helm-oci-chart-releaser@d94988c92bed2e09c6113981f15f8bb495d10943
+        with:
+          name: k8s-node-dns
+          repository: ${{ github.repository_owner }}
+          tag: ${{ steps.version.outputs.version }}
+          path: chart
+          registry: ghcr.io
+          registry_username: ${{ github.actor }}
+          registry_password: ${{ secrets.GITHUB_TOKEN }}

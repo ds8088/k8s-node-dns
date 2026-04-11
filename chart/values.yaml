@@ -1,0 +1,84 @@
+# How many Pod replicas should be set up by the Deployment.
+replicaCount: 1
+
+image:
+  # Image repository URL.
+  repository: ghcr.io/ds8088/k8s-node-dns
+
+  # Sets imagePullPolicy in Pod container spec.
+  pullPolicy: IfNotPresent
+
+  # Image tag. Defaults to .Chart.AppVersion.
+  tag: ""
+
+# Replaces the chart name from Chart.yaml, used as a prefix for object names.
+nameOverride: ""
+# Completely replaces the generated name for k8s objects.
+fullnameOverride: ""
+
+# Service configuration.
+service:
+  # Service name.
+  name: ""
+  # Type of the service.
+  type: ClusterIP
+  # Service port. Both UDP and TCP are exposed.
+  port: 53
+  # ipFamilyPolicy for the Service.
+  ipFamilyPolicy: ""
+
+serviceAccount:
+  name: ""
+
+terminationGracePeriodSeconds: ""
+priorityClassName: ""
+
+# Pod resources. Example:
+# limits:
+#   memory: 256Mi
+# requests:
+#   cpu: 25m
+#   memory: 32Mi
+resources: {}
+
+# Sets hostUsers on the pod spec.
+# Set to null to omit the field entirely.
+hostUsers: false
+
+podAnnotations: {}
+podLabels: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# DNS controller configuration.
+config:
+  # Required: DNS zone FQDN (example: lb.example.com).
+  zone: ""
+  # Required: SOA FQDNs with glue IPs.
+  soaNS: ""
+  # Required: SOA admin email (example: admin@example.com).
+  soaEmail: ""
+
+  # DNS listen address (default: all interfaces).
+  bind: ""
+  # DNS listen port.
+  port: 53
+  # TTL for A/AAAA records, in seconds.
+  ttl: 30
+
+  # SOA configuration.
+  soa:
+    refresh: 3600
+    retry: 900
+    expire: 86400
+    ttl: 30
+    negativeTTL: 30
+
+  # Node annotation keys.
+  areasAnnotation: "k8s.pootis.network/node-areas"
+  ipsAnnotation: "k8s.pootis.network/node-ips"
+
+  # Enable leader election, required if replicaCount > 1.
+  leaderElect: false

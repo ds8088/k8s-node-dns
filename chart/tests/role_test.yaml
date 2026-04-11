@@ -1,0 +1,56 @@
+suite: Role
+templates:
+  - role.yaml
+release:
+  name: k8s-node-dns
+  namespace: test-ns
+
+tests:
+  - it: should not render when leaderElect is false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should render Role when when leaderElect is true
+    set:
+      config.leaderElect: true
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isAPIVersion:
+          of: rbac.authorization.k8s.io/v1
+      - isKind:
+          of: Role
+      - equal:
+          path: metadata.name
+          value: k8s-node-dns-leader-election
+
+  - it: should grant get/create/update on leases resource
+    set:
+      config.leaderElect: true
+    asserts:
+      - equal:
+          path: rules
+          value:
+            - apiGroups:
+                - coordination.k8s.io
+              resources:
+                - leases
+              verbs:
+                - get
+                - create
+                - update
+
+  - it: should have the standard chart labels
+    set:
+      config.leaderElect: true
+    asserts:
+      - equal:
+          path: metadata.labels["app.kubernetes.io/component"]
+          value: k8s-node-dns
+      - equal:
+          path: metadata.labels["app.kubernetes.io/name"]
+          value: k8s-node-dns
+      - equal:
+          path: metadata.labels["app.kubernetes.io/instance"]
+          value: k8s-node-dns

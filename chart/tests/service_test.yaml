@@ -1,0 +1,88 @@
+suite: Service
+templates:
+  - service.yaml
+release:
+  name: k8s-node-dns
+  namespace: test-ns
+
+tests:
+  - it: should render Service with correct name and namespace
+    release:
+      namespace: custom-ns
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isAPIVersion:
+          of: v1
+      - isKind:
+          of: Service
+      - equal:
+          path: metadata.name
+          value: k8s-node-dns
+      - equal:
+          path: metadata.namespace
+          value: custom-ns
+
+  - it: should default to ClusterIP type
+    asserts:
+      - equal:
+          path: spec.type
+          value: ClusterIP
+
+  - it: should use a custom service type if set
+    set:
+      service.type: NodePort
+    asserts:
+      - equal:
+          path: spec.type
+          value: NodePort
+
+  - it: should expose service ports
+    asserts:
+      - equal:
+          path: spec.ports[0].name
+          value: dns-udp
+      - equal:
+          path: spec.ports[0].protocol
+          value: UDP
+      - equal:
+          path: spec.ports[0].port
+          value: 53
+      - equal:
+          path: spec.ports[0].targetPort
+          value: dns-udp
+      - equal:
+          path: spec.ports[1].name
+          value: dns-tcp
+      - equal:
+          path: spec.ports[1].protocol
+          value: TCP
+      - equal:
+          path: spec.ports[1].port
+          value: 53
+      - equal:
+          path: spec.ports[1].targetPort
+          value: dns-tcp
+
+  - it: should set custom ports if overridden
+    set:
+      service.port: 5353
+    asserts:
+      - equal:
+          path: spec.ports[0].port
+          value: 5353
+      - equal:
+          path: spec.ports[1].port
+          value: 5353
+
+  - it: should have the standard chart labels
+    asserts:
+      - equal:
+          path: metadata.labels["app.kubernetes.io/component"]
+          value: k8s-node-dns
+      - equal:
+          path: metadata.labels["app.kubernetes.io/name"]
+          value: k8s-node-dns
+      - equal:
+          path: metadata.labels["app.kubernetes.io/instance"]
+          value: k8s-node-dns

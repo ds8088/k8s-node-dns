@@ -1,0 +1,70 @@
+suite: RoleBinding
+templates:
+  - rolebinding.yaml
+release:
+  name: k8s-node-dns
+  namespace: test-ns
+
+tests:
+  - it: should not render when leaderElect is false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should render RoleBinding when leaderElect is true
+    set:
+      config.leaderElect: true
+    release:
+      namespace: custom-ns
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isAPIVersion:
+          of: rbac.authorization.k8s.io/v1
+      - isKind:
+          of: RoleBinding
+      - equal:
+          path: metadata.name
+          value: k8s-node-dns-leader-election
+      - equal:
+          path: metadata.namespace
+          value: custom-ns
+
+  - it: should have correct roleRef
+    set:
+      config.leaderElect: true
+    asserts:
+      - equal:
+          path: roleRef.apiGroup
+          value: rbac.authorization.k8s.io
+      - equal:
+          path: roleRef.kind
+          value: Role
+      - equal:
+          path: roleRef.name
+          value: k8s-node-dns-leader-election
+
+  - it: should bind subject to the ServiceAccount
+    set:
+      config.leaderElect: true
+    asserts:
+      - equal:
+          path: subjects[0].kind
+          value: ServiceAccount
+      - equal:
+          path: subjects[0].name
+          value: k8s-node-dns
+
+  - it: should have the standard chart labels
+    set:
+      config.leaderElect: true
+    asserts:
+      - equal:
+          path: metadata.labels["app.kubernetes.io/component"]
+          value: k8s-node-dns
+      - equal:
+          path: metadata.labels["app.kubernetes.io/name"]
+          value: k8s-node-dns
+      - equal:
+          path: metadata.labels["app.kubernetes.io/instance"]
+          value: k8s-node-dns

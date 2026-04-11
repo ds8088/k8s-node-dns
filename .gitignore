@@ -10,6 +10,14 @@
 
 !*.go
 
+!chart
+!chart/.helmignore
+!chart/templates
+!chart/tests
+!chart/templates/NOTES.txt
+!chart/**/*.yaml
+!chart/**/*.tpl
+
 !.github
 !.github/workflows
 !.github/workflows/*.yml

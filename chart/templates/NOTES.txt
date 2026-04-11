@@ -1,0 +1,10 @@
+k8s-node-dns has been deployed.
+
+Namespace: {{ .Release.Namespace }}
+
+Service:
+  Type: {{ .Values.service.type }}
+  Port: {{ .Values.service.port }}
+  {{- if .Values.service.ipFamilyPolicy }}
+  IP family policy: {{ .Values.service.ipFamilyPolicy }}
+  {{- end }}

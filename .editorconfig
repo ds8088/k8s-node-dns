@@ -12,5 +12,5 @@ max_line_length = 140
 [*.go]
 indent_style = tab
 
-[*.{json,yml,yaml,md}]
+[*.{json,yml,yaml,md,tpl}]
 indent_size = 2
