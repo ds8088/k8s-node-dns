@@ -14,9 +14,15 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
+// NSConfig represents a nameserver FQDN and all of its associated glue records,
+// if the nameserver is located in-zone.
+type NSConfig struct {
+	FQDN string // with trailing dot
+	Glue []netip.Addr
+}
+
 // SOAConfig represents the configuration for zone's SOA record.
 type SOAConfig struct {
-	NS          string // primary NS FQDN
 	Email       string // email in DNS dot-format
 	TTL         uint32 // TTL of SOA RR
 	Refresh     uint32
@@ -30,8 +36,8 @@ type DNSConfig struct {
 	Zone     string // FQDN with trailing dot
 	BindAddr string // address to listen on
 
-	TTL  uint32 // default TTL for node records
-	Glue []netip.Addr
+	TTL         uint32     // default TTL for node records
+	Nameservers []NSConfig // first entry is the SOA primary NS
 
 	SOA SOAConfig
 }
@@ -166,15 +172,16 @@ func (h *dnsHandler) handleApex(m *dns.Msg, q dns.Question) {
 	switch q.Qtype {
 	case dns.TypeSOA:
 		m.Answer = append(m.Answer, h.soaRR())
-		m.Ns = append(m.Ns, h.nsRR())
+		m.Ns = append(m.Ns, h.nsRRs()...)
 		h.appendGlue(m)
 
 	case dns.TypeANY:
-		m.Answer = append(m.Answer, h.soaRR(), h.nsRR())
+		m.Answer = append(m.Answer, h.soaRR())
+		m.Answer = append(m.Answer, h.nsRRs()...)
 		h.appendGlue(m)
 
 	case dns.TypeNS:
-		m.Answer = append(m.Answer, h.nsRR())
+		m.Answer = append(m.Answer, h.nsRRs()...)
 		h.appendGlue(m)
 
 	default:
@@ -184,10 +191,13 @@ func (h *dnsHandler) handleApex(m *dns.Msg, q dns.Question) {
 }
 
 // soaRR returns the SOA record.
+//
+// The primary NS is taken from the first configured nameserver
+// (there is always at least one nameserver).
 func (h *dnsHandler) soaRR() *dns.SOA {
 	return &dns.SOA{
 		Hdr:     dns.RR_Header{Name: h.cfg.Zone, Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: h.cfg.SOA.TTL},
-		Ns:      h.cfg.SOA.NS,
+		Ns:      h.cfg.Nameservers[0].FQDN,
 		Mbox:    h.cfg.SOA.Email,
 		Serial:  h.store.Serial(),
 		Refresh: h.cfg.SOA.Refresh,
@@ -197,34 +207,39 @@ func (h *dnsHandler) soaRR() *dns.SOA {
 	}
 }
 
-// nsRR returns the NS record for SOA's primary NS.
-func (h *dnsHandler) nsRR() *dns.NS {
-	return &dns.NS{
-		Hdr: dns.RR_Header{Name: h.cfg.Zone, Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: h.cfg.TTL},
-		Ns:  dns.Fqdn(h.cfg.SOA.NS),
+// nsRRs returns NS records for all configured nameservers.
+func (h *dnsHandler) nsRRs() []dns.RR {
+	rrs := make([]dns.RR, 0, len(h.cfg.Nameservers))
+	for _, ns := range h.cfg.Nameservers {
+		rrs = append(rrs, &dns.NS{
+			Hdr: dns.RR_Header{Name: h.cfg.Zone, Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: h.cfg.TTL},
+			Ns:  dns.Fqdn(ns.FQDN),
+		})
 	}
+
+	return rrs
 }
 
-// appendGlue appends glue records to the DNS message if SOA NS is located inside the dnsHandler's zone.
+// appendGlue appends glue records to the DNS message for in-zone nameservers.
 func (h *dnsHandler) appendGlue(m *dns.Msg) {
-	// Get the FQDN of SOA NS. If it's in our zone, proceed.
-	ns := dns.Fqdn(h.cfg.SOA.NS)
-	if !dns.IsSubDomain(h.cfg.Zone, strings.ToLower(ns)) {
-		return
-	}
+	for _, ns := range h.cfg.Nameservers {
+		fqdn := dns.Fqdn(ns.FQDN)
+		if !dns.IsSubDomain(h.cfg.Zone, strings.ToLower(fqdn)) {
+			continue
+		}
 
-	for _, glue := range h.cfg.Glue {
-		if glue.Is4() {
-			m.Extra = append(m.Extra, &dns.A{
-				Hdr: dns.RR_Header{Name: ns, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: h.cfg.TTL},
-				A:   glue.AsSlice(),
-			})
-		} else {
-			// IPv6
-			m.Extra = append(m.Extra, &dns.AAAA{
-				Hdr:  dns.RR_Header{Name: ns, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: h.cfg.TTL},
-				AAAA: glue.AsSlice(),
-			})
+		for _, glue := range ns.Glue {
+			if glue.Is4() {
+				m.Extra = append(m.Extra, &dns.A{
+					Hdr: dns.RR_Header{Name: fqdn, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: h.cfg.TTL},
+					A:   glue.AsSlice(),
+				})
+			} else {
+				m.Extra = append(m.Extra, &dns.AAAA{
+					Hdr:  dns.RR_Header{Name: fqdn, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: h.cfg.TTL},
+					AAAA: glue.AsSlice(),
+				})
+			}
 		}
 	}
 }

@@ -37,16 +37,19 @@ func (w *testResponseWriter) Hijack()                     {}
 
 // newTestHandler returns a dnsHandler wired to the given store.
 //
-// The SOA primary NS is set to "ns.<zone>" so glue tests can use an in-zone NS.
-func newTestHandler(zone string, store *Store, glue ...netip.Addr) *dnsHandler {
+// A single in-zone NS "ns.<zone>" with no glue is used as default.
+func newTestHandler(zone string, store *Store, nameservers ...NSConfig) *dnsHandler {
+	if len(nameservers) == 0 {
+		nameservers = []NSConfig{{FQDN: "ns." + zone}}
+	}
+
 	return &dnsHandler{
 		cfg: DNSConfig{
-			Zone:     zone,
-			BindAddr: ":53",
-			TTL:      30,
-			Glue:     glue,
+			Zone:        zone,
+			BindAddr:    ":53",
+			TTL:         30,
+			Nameservers: nameservers,
 			SOA: SOAConfig{
-				NS:          "ns." + zone,
 				Email:       "admin." + zone,
 				Refresh:     3600,
 				Retry:       900,
@@ -259,7 +262,10 @@ func TestDNSApexANY(t *testing.T) {
 func TestDNSGlueInZone(t *testing.T) {
 	t.Parallel()
 
-	h := newTestHandler("example.com.", NewStore(), netip.MustParseAddr("1.2.3.4"), netip.MustParseAddr("2001:db8::1"))
+	h := newTestHandler("example.com.", NewStore(), NSConfig{
+		FQDN: "ns.example.com.",
+		Glue: []netip.Addr{netip.MustParseAddr("1.2.3.4"), netip.MustParseAddr("2001:db8::1")},
+	})
 	resp := queryRoundtrip(t, h, dns.TypeNS, "example.com.")
 
 	var ipv4Found, ipv6Found bool
@@ -285,9 +291,10 @@ func TestDNSGlueInZone(t *testing.T) {
 func TestDNSGlueOutOfZone(t *testing.T) {
 	t.Parallel()
 
-	h := newTestHandler("example.com.", NewStore(), netip.MustParseAddr("1.2.3.4"))
-	h.cfg.SOA.NS = "ns.example.org."
-	h.cfg.SOA.Email = "admin.example.org."
+	h := newTestHandler("example.com.", NewStore(), NSConfig{
+		FQDN: "ns.example.org.",
+		Glue: []netip.Addr{netip.MustParseAddr("1.2.3.4")},
+	})
 	resp := queryRoundtrip(t, h, dns.TypeNS, "example.com.")
 
 	if len(resp.Extra) != 0 {
@@ -513,11 +520,11 @@ func TestDNSTCPNoTruncation(t *testing.T) {
 // newStartDNSConfig returns a minimal valid DNSConfig for tests.
 func newStartDNSConfig(addr string) DNSConfig {
 	return DNSConfig{
-		Zone:     "example.com.",
-		BindAddr: addr,
-		TTL:      5,
+		Zone:        "example.com.",
+		BindAddr:    addr,
+		TTL:         5,
+		Nameservers: []NSConfig{{FQDN: "ns.example.com."}},
 		SOA: SOAConfig{
-			NS:          "ns.example.com.",
 			Email:       "admin.example.com.",
 			TTL:         5,
 			Refresh:     60,
@@ -643,4 +650,47 @@ func TestStartDNSBindError(t *testing.T) {
 	if err := StartDNS(ctx, newStartDNSConfig(addr), NewStore()); err == nil {
 		t.Error("expected StartDNS to return an error when the address is already in use")
 	}
+}
+
+func TestDNSMultipleNameservers(t *testing.T) {
+	t.Parallel()
+
+	h := newTestHandler("example.com.", NewStore(),
+		NSConfig{FQDN: "ns1.example.com.", Glue: []netip.Addr{netip.MustParseAddr("1.1.1.1")}},
+		NSConfig{FQDN: "ns2.pootis.network."},
+	)
+	resp := queryRoundtrip(t, h, dns.TypeNS, "example.com.")
+
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Errorf("unexpected DNS code: got %v, expected NOERROR", dns.RcodeToString[resp.Rcode])
+	}
+
+	ns1Found, ns2Found := false, false
+	for _, rr := range resp.Answer {
+		if ns, ok := rr.(*dns.NS); ok {
+			switch ns.Ns {
+			case "ns1.example.com.":
+				ns1Found = true
+			case "ns2.pootis.network.":
+				ns2Found = true
+			}
+		}
+	}
+
+	if !ns1Found {
+		t.Errorf("expected NS1 (ns1.example.com) in DNS response")
+	}
+
+	if !ns2Found {
+		t.Errorf("expected NS2 (ns2.pootis.network) in DNS response")
+	}
+
+	// Check if glue is present for ns1, since it is in-zone.
+	for _, rr := range resp.Extra {
+		if a, ok := rr.(*dns.A); ok && a.A.String() == "1.1.1.1" {
+			return
+		}
+	}
+
+	t.Error("expected glue A record for in-zone ns1")
 }

@@ -84,10 +84,10 @@ func startTestDNSServer(t *testing.T, store *Store, zone string) string {
 
 	h := &dnsHandler{
 		cfg: DNSConfig{
-			Zone: zone,
-			TTL:  5,
+			Zone:        zone,
+			TTL:         5,
+			Nameservers: []NSConfig{{FQDN: "ns." + zone}},
 			SOA: SOAConfig{
-				NS:          "ns." + zone,
 				Email:       "admin." + zone,
 				TTL:         5,
 				Refresh:     60,

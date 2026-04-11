@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"math"
@@ -10,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/miekg/dns"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -30,15 +32,15 @@ func main() {
 		bind = flag.String("bind", "", "DNS listen address (default: all addresses).")
 		port = flag.Int("port", 53, "DNS listen port.")
 
-		ttl            = flag.Uint("ttl", 30, "TTL for A/AAAA records, in seconds.")
-		soaNS          = flag.String("soa-ns", "", "SOA primary NS FQDN. Required.")
+		ttl   = flag.Uint("ttl", 30, "TTL for A/AAAA records, in seconds.")
+		soaNS = flag.String("soa-ns", "", "SOA nameservers, semicolon-separated, with optional glue records (separated by commas) and delimited by a colon. "+
+			"Example: ns1.lb.pootis.network:1.1.1.1,2001:db8::1;ns2.pootis.network. The first entry is the SOA primary NS. Required.")
 		soaEmail       = flag.String("soa-email", "", "SOA admin email (example: admin@pootis.network). Required.")
 		soaRefresh     = flag.Uint("soa-refresh", 3600, "SOA refresh interval, in seconds.")
 		soaRetry       = flag.Uint("soa-retry", 900, "SOA retry interval, in seconds.")
 		soaExpire      = flag.Uint("soa-expire", 86400, "SOA expire interval, in seconds.")
 		soaTTL         = flag.Uint("soa-ttl", 30, "SOA TTL, in seconds.")
 		soaNegativeTTL = flag.Uint("soa-neg-ttl", 30, "SOA negative TTL, in seconds.")
-		glueStr        = flag.String("glue", "", "Glue IPs for in-zone NS, comma-separated.")
 
 		areasAnnotation = flag.String("areas-annotation", "k8s.pootis.network/node-areas", "Node annotation key for area membership.")
 		ipsAnnotation   = flag.String("ips-annotation", "k8s.pootis.network/node-ips", "Node annotation key for IPs.")
@@ -69,34 +71,22 @@ func main() {
 	}
 
 	zoneFQDN := strings.ToLower(toFQDN(*zone))
-	soaNSFQDN := strings.ToLower(toFQDN(*soaNS))
 	soaEmailFQDN := strings.ToLower(toEmail(*soaEmail))
-	var glueAddrs []netip.Addr
 
-	for glue := range strings.SplitSeq(*glueStr, ",") {
-		glue = strings.TrimSpace(glue)
-		if glue == "" {
-			continue
-		}
-
-		addr, err := netip.ParseAddr(glue)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: invalid glue IP: %v\n", err)
-			os.Exit(1)
-		}
-
-		glueAddrs = append(glueAddrs, addr)
+	nameservers, err := parseNameservers(*soaNS, zoneFQDN)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "--soa-ns: %v\n", err)
+		os.Exit(1)
 	}
 
 	store := NewStore()
 
 	dnsCfg := DNSConfig{
-		Zone:     zoneFQDN,
-		BindAddr: net.JoinHostPort(*bind, strconv.Itoa(*port)),
-		TTL:      toUint32Saturate(ttl),
-		Glue:     glueAddrs,
+		Zone:        zoneFQDN,
+		BindAddr:    net.JoinHostPort(*bind, strconv.Itoa(*port)),
+		TTL:         toUint32Saturate(ttl),
+		Nameservers: nameservers,
 		SOA: SOAConfig{
-			NS:          soaNSFQDN,
 			Email:       soaEmailFQDN,
 			TTL:         toUint32Saturate(soaTTL),
 			Refresh:     toUint32Saturate(soaRefresh),
@@ -109,8 +99,8 @@ func main() {
 	ctx := ctrl.SetupSignalHandler()
 
 	go func() {
-		if err := StartDNS(ctx, dnsCfg, store); err != nil {
-			log.Error(err, "DNS server failed")
+		if dnsErr := StartDNS(ctx, dnsCfg, store); dnsErr != nil {
+			log.Error(dnsErr, "DNS server failed")
 			os.Exit(1)
 		}
 	}()
@@ -140,6 +130,61 @@ func main() {
 		log.Error(err, "manager exited with error")
 		os.Exit(1)
 	}
+}
+
+// parseNameservers parses the --soa-ns flag value.
+//
+// Nameservers should be formatted as such:
+//   - one or more semicolon-separated entries of the form "fqdn:glue1,glue2";
+//   - each entry consists of a nameserver FQDN and zero, one, or more glue records;
+//   - nameserver FQDN is delimited from its glue with a colon;
+//   - glue records are delimited by a colon.
+//
+// zone must be a normalised FQDN (lowercase and with a trailing dot).
+func parseNameservers(s, zone string) ([]NSConfig, error) {
+	nameservers := []NSConfig{}
+
+	for part := range strings.SplitSeq(s, ";") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+
+		nsFQDN, glueStr, ok := strings.Cut(part, ":")
+		nsFQDN = strings.ToLower(toFQDN(strings.TrimSpace(nsFQDN)))
+
+		glueAddrs := []netip.Addr{}
+		if ok {
+			for glue := range strings.SplitSeq(glueStr, ",") {
+				glue = strings.TrimSpace(glue)
+				if glue == "" {
+					continue
+				}
+
+				addr, err := netip.ParseAddr(glue)
+				if err != nil {
+					return nil, fmt.Errorf("invalid glue IP %v for nameserver %v: %w", glue, nsFQDN, err)
+				}
+
+				glueAddrs = append(glueAddrs, addr)
+			}
+		}
+
+		nameservers = append(nameservers, NSConfig{FQDN: nsFQDN, Glue: glueAddrs})
+	}
+
+	if len(nameservers) == 0 {
+		return nil, errors.New("at least one nameserver is expected")
+	}
+
+	// All in-zone NS should have glue records.
+	for _, ns := range nameservers {
+		if dns.IsSubDomain(zone, ns.FQDN) && len(ns.Glue) == 0 {
+			return nil, fmt.Errorf("nameserver %v is in-zone but has no glue records", ns.FQDN)
+		}
+	}
+
+	return nameservers, nil
 }
 
 func toFQDN(s string) string {

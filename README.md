@@ -73,7 +73,7 @@ If leader election is enabled (`--leader-elect`), the controller also needs perm
 ## Running
 
 ```sh
-k8s-node-dns --zone lb.pootis.network --soa-email admin@pootis.network --soa-ns ns1.lb.pootis.network --glue 1.2.3.4
+k8s-node-dns --zone lb.pootis.network --soa-email admin@pootis.network --soa-ns ns1.lb.pootis.network:1.2.3.4
 ```
 
 ## Building from source
