@@ -75,7 +75,7 @@ If leader election is enabled (`--leader-elect`), the controller also needs perm
 A Helm chart is available in GHCR OCI:
 
 ```sh
-helm install k8s-node-dns oci://ghcr.io/ds8088/k8s-node-dns/chart/k8s-node-dns
+helm install k8s-node-dns oci://ghcr.io/ds8088/k8s-node-dns-helm-chart
 ```
 
 [chart/values.yaml](./chart/values.yaml) contains all available configuration options.

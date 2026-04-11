@@ -58,7 +58,7 @@ jobs:
       - name: Publish chart to GHCR
         uses: appany/helm-oci-chart-releaser@d94988c92bed2e09c6113981f15f8bb495d10943
         with:
-          name: k8s-node-dns
+          name: k8s-node-dns-helm-chart
           repository: ${{ github.repository_owner }}
           tag: ${{ steps.version.outputs.version }}
           path: chart
