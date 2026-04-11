@@ -25,11 +25,18 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
 
-      - name: Run helm-unittest
-        uses: d3adb5/helm-unittest-action@850bc76597579183998069830d5fa8c3ef0ea34a
+      - name: Install Helm
+        uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2
         with:
-          helm-version: v4.1.4
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          version: v4.1.4
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install helm-unittest
+        run: |
+          helm plugin install https://github.com/helm-unittest/helm-unittest --verify=false --version "1.0.3"
+
+      - name: Run chart unit tests
+        run: helm unittest chart
 
   publish:
     name: Publish chart
