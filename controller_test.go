@@ -197,11 +197,11 @@ func TestReconcilerNodeUpdate(t *testing.T) {
 	for _, area := range []string{"home", "external"} {
 		ips, ok := store.GetAreaIPs(area)
 		if !ok {
-			t.Errorf("expected presence of area \"%v\" after reconciliation", area)
+			t.Errorf("expected presence of area %q after reconciliation", area)
 		}
 
 		if len(ips) != 2 {
-			t.Errorf("expected 2 IPs in area \"%v\", got %v IPs", area, len(ips))
+			t.Errorf("expected 2 IPs in area %q, got %v IPs", area, len(ips))
 		}
 	}
 }
