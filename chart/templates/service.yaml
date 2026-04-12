@@ -7,11 +7,22 @@ metadata:
     {{- include "k8s-node-dns.labels" . | nindent 4 }}
 spec:
   type: {{ .Values.service.type }}
+  selector:
+    {{- include "k8s-node-dns.selectorLabels" . | nindent 4 }}
+
   {{- if .Values.service.ipFamilyPolicy }}
   ipFamilyPolicy: {{ .Values.service.ipFamilyPolicy }}
   {{- end }}
-  selector:
-    {{- include "k8s-node-dns.selectorLabels" . | nindent 4 }}
+
+  {{- if .Values.service.clusterIP }}
+  clusterIP: {{ .Values.service.clusterIP }}
+  {{- end }}
+
+  {{- if .Values.service.clusterIPs }}
+  clusterIPs:
+    {{- toYaml .Values.service.clusterIPs | nindent 4 }}
+  {{- end }}
+
   ports:
     - name: dns-udp
       port: {{ .Values.service.port }}

@@ -26,6 +26,10 @@ service:
   port: 53
   # ipFamilyPolicy for the Service.
   ipFamilyPolicy: ""
+  # clusterIP for the Service.
+  clusterIP: ""
+  # clusterIPs for the Service.
+  clusterIPs: []
 
 serviceAccount:
   name: ""

@@ -86,3 +86,31 @@ tests:
       - equal:
           path: metadata.labels["app.kubernetes.io/instance"]
           value: k8s-node-dns
+
+  - it: should not set clusterIP and clusterIPs by default
+    asserts:
+      - isNull:
+          path: spec.clusterIP
+      - isNull:
+          path: spec.clusterIPs
+
+  - it: should set clusterIP if provided
+    set:
+      service.clusterIP: "1.2.3.4"
+    asserts:
+      - equal:
+          path: spec.clusterIP
+          value: "1.2.3.4"
+
+  - it: should set clusterIPs if provided
+    set:
+      service.clusterIPs:
+        - "1.2.3.5"
+        - "2001:db0::1"
+    asserts:
+      - equal:
+          path: spec.clusterIPs[0]
+          value: "1.2.3.5"
+      - equal:
+          path: spec.clusterIPs[1]
+          value: "2001:db0::1"
