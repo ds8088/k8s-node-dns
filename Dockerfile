@@ -18,11 +18,7 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build \
 
 FROM alpine:3.23
 
-RUN addgroup -S -g 10001 app && adduser -S -G app -u 10001 app
-
 COPY --from=builder /opt/build/k8s-node-dns /opt/k8s-node-dns
-
-USER 10001
 
 EXPOSE 53/udp 53/tcp
 

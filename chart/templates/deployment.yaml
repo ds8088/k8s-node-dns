@@ -26,8 +26,6 @@ spec:
 
     spec:
       serviceAccountName: {{ include "k8s-node-dns.serviceAccountName" . }}
-      securityContext:
-        runAsNonRoot: true
 
       {{- if .Values.terminationGracePeriodSeconds }}
       terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
