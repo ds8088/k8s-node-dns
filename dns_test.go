@@ -43,23 +43,19 @@ func newTestHandler(zone string, store *Store, nameservers ...NSConfig) *dnsHand
 		nameservers = []NSConfig{{FQDN: "ns." + zone}}
 	}
 
-	return &dnsHandler{
-		cfg: DNSConfig{
-			Zone:        zone,
-			BindAddr:    ":53",
-			TTL:         30,
-			Nameservers: nameservers,
-			SOA: SOAConfig{
-				Email:       "admin." + zone,
-				Refresh:     3600,
-				Retry:       900,
-				Expire:      86400,
-				NegativeTTL: 30,
-			},
+	return newDNSHandler(DNSConfig{
+		Zone:        zone,
+		BindAddr:    ":53",
+		TTL:         30,
+		Nameservers: nameservers,
+		SOA: SOAConfig{
+			Email:       "admin." + zone,
+			Refresh:     3600,
+			Retry:       900,
+			Expire:      86400,
+			NegativeTTL: 30,
 		},
-		store: store,
-		log:   logr.Discard(),
-	}
+	}, store, logr.Discard())
 }
 
 // queryRoundtrip sends a single-question DNS query to the handler and waits for a response.
@@ -693,4 +689,116 @@ func TestDNSMultipleNameservers(t *testing.T) {
 	}
 
 	t.Error("expected glue A record for in-zone ns1")
+}
+
+func TestDNSInZoneNS(t *testing.T) {
+	t.Parallel()
+
+	h := newTestHandler("example.com.", NewStore(), NSConfig{
+		FQDN: "ns.example.com.",
+		Glue: []netip.Addr{netip.MustParseAddr("1.2.3.4"), netip.MustParseAddr("2001:db8::1")},
+	})
+
+	for _, test := range []struct {
+		title      string
+		qtype      uint16
+		expectedIP string
+	}{
+		{"A", dns.TypeA, "1.2.3.4"},
+		{"AAAA", dns.TypeAAAA, "2001:db8::1"},
+	} {
+		t.Run(test.title, func(t *testing.T) {
+			t.Parallel()
+
+			resp := queryRoundtrip(t, h, test.qtype, "ns.example.com.")
+
+			if resp.Rcode != dns.RcodeSuccess {
+				t.Errorf("unexpected DNS code: got %v, expected NOERROR", dns.RcodeToString[resp.Rcode])
+			}
+
+			if len(resp.Answer) != 1 {
+				t.Fatalf("expected 1 answer, got %v answers", len(resp.Answer))
+			}
+
+			switch test.qtype {
+			case dns.TypeA:
+				a, ok := resp.Answer[0].(*dns.A)
+				if !ok {
+					t.Errorf("expected A record in answer section, got %T", resp.Answer[0])
+				}
+
+				if a.A.String() != test.expectedIP {
+					t.Errorf("unexpected IP: got %v, want %v", a.A.String(), test.expectedIP)
+				}
+
+			case dns.TypeAAAA:
+				aaaa, ok := resp.Answer[0].(*dns.AAAA)
+				if !ok {
+					t.Errorf("expected AAA record in answer section, got %T", resp.Answer[0])
+				}
+
+				if aaaa.AAAA.String() != test.expectedIP {
+					t.Errorf("unexpected IP: got %v, want %v", aaaa.AAAA.String(), test.expectedIP)
+				}
+			}
+		})
+	}
+}
+
+func TestDNSInZoneNSNoGlue(t *testing.T) {
+	t.Parallel()
+
+	// NS is in-zone but has no glue records configured; NODATA should be expected.
+	h := newTestHandler("example.com.", NewStore(), NSConfig{
+		FQDN: "ns.example.com.",
+	})
+	resp := queryRoundtrip(t, h, dns.TypeA, "ns.example.com.")
+
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Errorf("unexpected DNS code: got %v, expected NOERROR", dns.RcodeToString[resp.Rcode])
+	}
+
+	if len(resp.Answer) != 0 {
+		t.Errorf("expected empty answer for NODATA response, got %v records", len(resp.Answer))
+	}
+
+	for _, rr := range resp.Ns {
+		if _, ok := rr.(*dns.SOA); ok {
+			return
+		}
+	}
+
+	t.Error("expected SOA in authority section for NODATA response")
+}
+
+// TestDNSInZoneNSPriority checks that if a nameserver and an area are defined with the same name,
+// the nameserver takes priority.
+func TestDNSInZoneNSPriority(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore()
+	store.Update("node1", []string{"ns"}, []netip.Addr{netip.MustParseAddr("1.1.1.1")}, true)
+
+	h := newTestHandler("example.com.", store, NSConfig{
+		FQDN: "ns.example.com.",
+		Glue: []netip.Addr{netip.MustParseAddr("1.2.3.4")},
+	})
+	resp := queryRoundtrip(t, h, dns.TypeA, "ns.example.com.")
+
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Errorf("unexpected DNS code: got %v, expected NOERROR", dns.RcodeToString[resp.Rcode])
+	}
+
+	if len(resp.Answer) != 1 {
+		t.Fatalf("expected a single A record, got %v records", len(resp.Answer))
+	}
+
+	a, ok := resp.Answer[0].(*dns.A)
+	if !ok {
+		t.Errorf("expected A record in answer section, got %T", resp.Answer[0])
+	}
+
+	if a.A.String() != "1.2.3.4" {
+		t.Errorf("expected NS address 1.2.3.4 but got %v", a.A.String())
+	}
 }

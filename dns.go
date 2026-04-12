@@ -46,6 +46,22 @@ type dnsHandler struct {
 	cfg   DNSConfig
 	store *Store
 	log   logr.Logger
+
+	inZoneNS map[string]NSConfig // In-zone nameservers, keyed by their lowercased FQDN
+}
+
+// newDNSHandler creates an instance of dnsHandler.
+func newDNSHandler(cfg DNSConfig, store *Store, log logr.Logger) *dnsHandler {
+	dh := &dnsHandler{cfg: cfg, store: store, log: log, inZoneNS: map[string]NSConfig{}}
+
+	for _, ns := range cfg.Nameservers {
+		lower := strings.ToLower(ns.FQDN)
+		if dns.IsSubDomain(cfg.Zone, lower) {
+			dh.inZoneNS[lower] = ns
+		}
+	}
+
+	return dh
 }
 
 // ServeDNS processes incoming DNS requests and writes a response.
@@ -106,6 +122,13 @@ func (h *dnsHandler) processDNSMessage(req, resp *dns.Msg) error {
 	// Handle zone apex.
 	if qname == h.cfg.Zone {
 		h.handleApex(resp, q)
+		return nil
+	}
+
+	// Handle queries for in-zone nameservers.
+	// These queries take priority compared to area queries.
+	if ns, ok := h.inZoneNS[qname]; ok {
+		h.handleInZoneNameserver(resp, q, ns)
 		return nil
 	}
 
@@ -190,6 +213,46 @@ func (h *dnsHandler) handleApex(m *dns.Msg, q dns.Question) {
 	}
 }
 
+// handleInZoneNameserver handles queries for an in-zone nameserver.
+//
+// It constructs the nameserver address from the glue records.
+func (h *dnsHandler) handleInZoneNameserver(m *dns.Msg, q dns.Question, ns NSConfig) {
+	switch q.Qtype {
+	case dns.TypeA:
+		for _, glue := range ns.Glue {
+			if glue.Is4() {
+				m.Answer = append(m.Answer, &dns.A{
+					Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: h.cfg.TTL},
+					A:   glue.AsSlice(),
+				})
+			}
+		}
+
+	case dns.TypeAAAA:
+		for _, glue := range ns.Glue {
+			if glue.Is6() {
+				m.Answer = append(m.Answer, &dns.AAAA{
+					Hdr:  dns.RR_Header{Name: q.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: h.cfg.TTL},
+					AAAA: glue.AsSlice(),
+				})
+			}
+		}
+
+	case dns.TypeANY:
+		// Minimal response according to RFC 8482.
+		m.Answer = append(m.Answer, &dns.HINFO{
+			Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeHINFO, Class: dns.ClassINET, Ttl: h.cfg.TTL},
+			Cpu: "RFC8482",
+		})
+	}
+
+	// NODATA: NS is known but no records match the query type.
+	// SOA goes in the authority section.
+	if len(m.Answer) == 0 {
+		m.Ns = []dns.RR{h.soaRR()}
+	}
+}
+
 // soaRR returns the SOA record.
 //
 // The primary NS is taken from the first configured nameserver
@@ -248,7 +311,7 @@ func (h *dnsHandler) appendGlue(m *dns.Msg) {
 // It returns an error if either server fails.
 func StartDNS(ctx context.Context, cfg DNSConfig, store *Store) error {
 	tm := 5 * time.Second
-	h := &dnsHandler{cfg: cfg, store: store, log: ctrl.Log.WithName("dns")}
+	h := newDNSHandler(cfg, store, ctrl.Log.WithName("dns"))
 	udp := &dns.Server{Addr: cfg.BindAddr, Net: "udp", Handler: h, ReadTimeout: tm, WriteTimeout: tm}
 	tcp := &dns.Server{Addr: cfg.BindAddr, Net: "tcp", Handler: h, ReadTimeout: tm, WriteTimeout: tm}
 
