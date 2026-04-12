@@ -75,12 +75,12 @@ If leader election is enabled (`--leader-elect`), the controller also needs perm
 A Helm chart is available in GHCR OCI:
 
 ```sh
-helm install k8s-node-dns oci://ghcr.io/ds8088/k8s-node-dns-helm-chart
+helm install k8s-node-dns oci://ghcr.io/ds8088/charts/k8s-node-dns
 ```
 
 [chart/values.yaml](./chart/values.yaml) contains all available configuration options.
 
- `config.zone`, `config.soaNS`, and `config.soaEmail` options are mandatory for Helm chart deployment.
+`config.zone`, `config.soaNS`, and `config.soaEmail` options are mandatory for Helm chart deployment.
 
 ## Running
 
