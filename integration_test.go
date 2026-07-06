@@ -152,9 +152,9 @@ func dnsExchange(ctx context.Context, addr, qname string, qtype uint16) (*dns.Ms
 		req := dnsutil.SetQuestion(new(dns.Msg), dnsutil.Fqdn(qname), qtype)
 		req.RecursionDesired = false
 
-		ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		sctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		var resp *dns.Msg
-		resp, _, err = c.Exchange(ctx, req, "udp", addr)
+		resp, _, err = c.Exchange(sctx, req, "udp", addr)
 		cancel()
 		if err == nil {
 			return resp, nil
