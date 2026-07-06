@@ -11,8 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
 	"github.com/go-logr/logr"
-	"github.com/miekg/dns"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -128,13 +129,11 @@ func startTestDNSServer(t *testing.T, store *Store, zone string) string {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
-		if shutdownErr := srv.ShutdownContext(ctx); shutdownErr != nil {
-			t.Logf("shutting down DNS server: %v", shutdownErr)
-		}
+		srv.Shutdown(ctx)
 	})
 
 	go func() {
-		serveErr := srv.ActivateAndServe()
+		serveErr := srv.ListenAndServe()
 		if serveErr != nil {
 			t.Logf("running DNS server: %v", serveErr)
 		}
@@ -144,16 +143,19 @@ func startTestDNSServer(t *testing.T, store *Store, zone string) string {
 }
 
 // dnsExchange sends a single DNS query to addr and returns the response.
-func dnsExchange(addr, qname string, qtype uint16) (*dns.Msg, error) {
-	c := &dns.Client{Net: "udp", Timeout: 2 * time.Second}
-	req := &dns.Msg{}
-	req.SetQuestion(dns.Fqdn(qname), qtype)
-	req.RecursionDesired = false
+func dnsExchange(ctx context.Context, addr, qname string, qtype uint16) (*dns.Msg, error) {
+	c := dns.NewClient()
+	c.ReadTimeout = 2 * time.Second
 
 	var err error
 	for range 3 {
+		req := dnsutil.SetQuestion(new(dns.Msg), dnsutil.Fqdn(qname), qtype)
+		req.RecursionDesired = false
+
+		ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		var resp *dns.Msg
-		resp, _, err = c.Exchange(req, addr)
+		resp, _, err = c.Exchange(ctx, req, "udp", addr)
+		cancel()
 		if err == nil {
 			return resp, nil
 		}
@@ -250,7 +252,7 @@ func TestIntegrationNodeReconciler(t *testing.T) {
 
 	// A query for home.lb.pootis.network. should also return 1.2.3.4.
 	if !pollCondition(t, func() bool {
-		resp, err := dnsExchange(dnsAddr, "home."+dnsZone, dns.TypeA)
+		resp, err := dnsExchange(ctx, dnsAddr, "home."+dnsZone, dns.TypeA)
 		if err != nil {
 			return false
 		}
@@ -260,7 +262,7 @@ func TestIntegrationNodeReconciler(t *testing.T) {
 		}
 
 		a, ok := resp.Answer[0].(*dns.A)
-		return ok && a.A.String() == "1.2.3.4"
+		return ok && a.Addr.String() == "1.2.3.4"
 	}) {
 		t.Error("expected A record from DNS with value = 1.2.3.4 after node creation")
 	}
@@ -287,7 +289,7 @@ func TestIntegrationNodeReconciler(t *testing.T) {
 
 	// Area is still known but has no IPs (expecting NODATA)
 	if !pollCondition(t, func() bool {
-		resp, err := dnsExchange(dnsAddr, "home."+dnsZone, dns.TypeA)
+		resp, err := dnsExchange(ctx, dnsAddr, "home."+dnsZone, dns.TypeA)
 		if err != nil {
 			return false
 		}
@@ -314,7 +316,7 @@ func TestIntegrationNodeReconciler(t *testing.T) {
 
 	// DNS: area is no longer known; should expect NXDOMAIN.
 	if !pollCondition(t, func() bool {
-		resp, err := dnsExchange(dnsAddr, "home."+dnsZone, dns.TypeA)
+		resp, err := dnsExchange(ctx, dnsAddr, "home."+dnsZone, dns.TypeA)
 		if err != nil {
 			return false
 		}
@@ -451,7 +453,7 @@ func TestIntegrationServiceReconciler(t *testing.T) {
 	}
 
 	if !pollCondition(t, func() bool {
-		return singleAAnswer(dnsAddr, qname) == "1.1.1.1"
+		return singleAAnswer(ctx, dnsAddr, qname) == "1.1.1.1"
 	}) {
 		t.Error("expected git service to resolve to 1.1.1.1 while hosted on snode1")
 	}
@@ -464,7 +466,7 @@ func TestIntegrationServiceReconciler(t *testing.T) {
 	}
 
 	if !pollCondition(t, func() bool {
-		return singleAAnswer(dnsAddr, qname) == "2.2.2.2"
+		return singleAAnswer(ctx, dnsAddr, qname) == "2.2.2.2"
 	}) {
 		t.Error("expected git service to resolve to 2.2.2.2 after the replica moved to snode2")
 	}
@@ -482,7 +484,7 @@ func TestIntegrationServiceReconciler(t *testing.T) {
 	}
 
 	if !pollCondition(t, func() bool {
-		resp, err := dnsExchange(dnsAddr, qname, dns.TypeA)
+		resp, err := dnsExchange(ctx, dnsAddr, qname, dns.TypeA)
 		return err == nil && resp.Rcode == dns.RcodeSuccess && len(resp.Answer) == 0
 	}) {
 		t.Error("expected NODATA for git service after its only node failed")
@@ -496,8 +498,8 @@ func TestIntegrationServiceReconciler(t *testing.T) {
 
 // singleAAnswer queries addr for qname and returns the single A record in a successful response,
 // or "" if the response is not a single-A NOERROR.
-func singleAAnswer(addr, qname string) string {
-	resp, err := dnsExchange(addr, qname, dns.TypeA)
+func singleAAnswer(ctx context.Context, addr, qname string) string {
+	resp, err := dnsExchange(ctx, addr, qname, dns.TypeA)
 	if err != nil || resp.Rcode != dns.RcodeSuccess || len(resp.Answer) != 1 {
 		return ""
 	}
@@ -507,7 +509,7 @@ func singleAAnswer(addr, qname string) string {
 		return ""
 	}
 
-	return a.A.String()
+	return a.Addr.String()
 }
 
 // pollCondition polls a condition callback until it returns true or timeout of 15 seconds elapses.

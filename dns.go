@@ -3,13 +3,17 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/netip"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
+	"codeberg.org/miekg/dns/rdata"
 	"github.com/go-logr/logr"
-	"github.com/miekg/dns"
 	"golang.org/x/sync/errgroup"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
@@ -66,7 +70,7 @@ func newDNSHandler(cfg DNSConfig, store *Store, log logr.Logger, ready func() bo
 
 	for _, ns := range cfg.Nameservers {
 		lower := strings.ToLower(ns.FQDN)
-		if dns.IsSubDomain(cfg.Zone, lower) {
+		if dnsutil.IsBelow(cfg.Zone, lower) {
 			dh.inZoneNS[lower] = ns
 		}
 	}
@@ -75,60 +79,92 @@ func newDNSHandler(cfg DNSConfig, store *Store, log logr.Logger, ready func() bo
 }
 
 // ServeDNS processes incoming DNS requests and writes a response.
-func (h *dnsHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
+func (h *dnsHandler) ServeDNS(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
+	resp := h.buildReply(r, w.LocalAddr().Network() == "udp")
+
+	if err := resp.Pack(); err != nil {
+		h.log.Error(err, "failed to pack DNS reply")
+		return
+	}
+
+	if _, err := io.Copy(w, resp); err != nil {
+		h.log.Error(err, "failed to send DNS reply")
+	}
+}
+
+// buildReply builds the response message for the request r. If udp is true, the
+// response is truncated to fit the advertised UDP buffer size.
+func (h *dnsHandler) buildReply(r *dns.Msg, udp bool) *dns.Msg {
 	resp := new(dns.Msg)
-	resp.SetReply(r)
+	dnsutil.SetReply(resp, r)
 
 	if err := h.processDNSMessage(r, resp); err != nil {
 		h.log.Error(err, "failed to process DNS message")
-		resp.SetRcode(r, dns.RcodeServerFailure)
+		resp.Rcode = dns.RcodeServerFailure
 	}
 
-	// Truncate oversized UDP responses and set the TC bit.
-	if w.LocalAddr().Network() == "udp" {
-		maxSize := uint16(dns.MinMsgSize) // 512 bytes
-		if opt := resp.IsEdns0(); opt != nil {
-			maxSize = opt.UDPSize()
+	if udp {
+		maxSize := dns.MinMsgSize // 512 bytes
+		if resp.UDPSize > dns.MinMsgSize {
+			maxSize = int(resp.UDPSize)
 		}
 
-		resp.Truncate(int(maxSize))
+		truncateResponse(resp, maxSize)
 	}
 
-	if err := w.WriteMsg(resp); err != nil {
-		h.log.Error(err, "failed to send DNS reply")
+	return resp
+}
+
+// truncateResponse truncates a DNS message so it fits in maxSize bytes,
+// setting the TC bit if any answer records had to be dropped.
+func truncateResponse(m *dns.Msg, maxSize int) {
+	if m.Len() <= maxSize {
+		return
+	}
+
+	// Drop glue records first.
+	m.Extra = nil
+
+	// Drop answer records until the message fits, flagging truncation.
+	for m.Len() > maxSize && len(m.Answer) > 0 {
+		m.Answer = m.Answer[:len(m.Answer)-1]
+		m.Truncated = true
 	}
 }
 
 func (h *dnsHandler) processDNSMessage(req, resp *dns.Msg) error {
 	// Echo EDNS0 back to the client.
-	if opt := req.IsEdns0(); opt != nil {
-		resp.SetEdns0(4096, false)
+	if req.UDPSize > 0 {
+		resp.UDPSize = 4096
 	}
 
 	// If the readiness callback is present and it returns false, reply with SERVFAIL.
 	if h.ready != nil && !h.ready() {
-		resp.SetRcode(req, dns.RcodeServerFailure)
+		resp.Rcode = dns.RcodeServerFailure
 		return nil
 	}
 
 	// A DNS query must have exactly one question.
 	if len(req.Question) != 1 {
-		resp.SetRcode(req, dns.RcodeFormatError)
+		resp.Rcode = dns.RcodeFormatError
 		return nil
 	}
 
 	q := req.Question[0]
 
 	// We only serve classes IN and ANY.
-	if q.Qclass != dns.ClassINET && q.Qclass != dns.ClassANY {
-		resp.SetRcode(req, dns.RcodeRefused)
+	if qclass := q.Header().Class; qclass != dns.ClassINET && qclass != dns.ClassANY {
+		resp.Rcode = dns.RcodeRefused
 		return nil
 	}
 
+	qtype := dns.RRToType(q)
+	name := q.Header().Name                      // original case, echoed in answer records
+	qname := strings.ToLower(dnsutil.Fqdn(name)) // normalized for lookups
+
 	// Refuse queries outside our zone.
-	qname := strings.ToLower(dns.Fqdn(q.Name))
-	if !dns.IsSubDomain(h.cfg.Zone, qname) {
-		resp.SetRcode(req, dns.RcodeRefused)
+	if !dnsutil.IsBelow(h.cfg.Zone, qname) {
+		resp.Rcode = dns.RcodeRefused
 		return nil
 	}
 
@@ -137,14 +173,14 @@ func (h *dnsHandler) processDNSMessage(req, resp *dns.Msg) error {
 
 	// Handle zone apex.
 	if qname == h.cfg.Zone {
-		h.handleApex(resp, q)
+		h.handleApex(resp, qtype)
 		return nil
 	}
 
 	// Handle queries for in-zone nameservers.
 	// These queries take priority compared to area queries.
 	if ns, ok := h.inZoneNS[qname]; ok {
-		h.handleInZoneNameserver(resp, q, ns)
+		h.handleInZoneNameserver(resp, name, qtype, ns)
 		return nil
 	}
 
@@ -171,13 +207,13 @@ func (h *dnsHandler) processDNSMessage(req, resp *dns.Msg) error {
 
 	if !known {
 		// Unknown name; send NXDOMAIN with SOA in authority.
-		resp.SetRcode(req, dns.RcodeNameError)
+		resp.Rcode = dns.RcodeNameError
 		resp.Ns = []dns.RR{h.soaRR()}
 		return nil
 	}
 
 	// Name is known (but it may resolve to no IPs).
-	h.writeAddrAnswers(resp, q, ips)
+	h.writeAddrAnswers(resp, name, qtype, ips)
 	return nil
 }
 
@@ -185,14 +221,14 @@ func (h *dnsHandler) processDNSMessage(req, resp *dns.Msg) error {
 // a list of IPs, according to the query type.
 //
 // If no records match, it returns a NODATA response with the SOA in the authority section.
-func (h *dnsHandler) writeAddrAnswers(resp *dns.Msg, q dns.Question, ips []netip.Addr) {
-	switch q.Qtype {
+func (h *dnsHandler) writeAddrAnswers(resp *dns.Msg, name string, qtype uint16, ips []netip.Addr) {
+	switch qtype {
 	case dns.TypeA:
 		for _, ip := range ips {
 			if ip.Is4() {
 				resp.Answer = append(resp.Answer, &dns.A{
-					Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: h.cfg.TTL},
-					A:   ip.AsSlice(),
+					Hdr: dns.Header{Name: name, Class: dns.ClassINET, TTL: h.cfg.TTL},
+					A:   rdata.A{Addr: ip},
 				})
 			}
 		}
@@ -201,8 +237,8 @@ func (h *dnsHandler) writeAddrAnswers(resp *dns.Msg, q dns.Question, ips []netip
 		for _, ip := range ips {
 			if ip.Is6() {
 				resp.Answer = append(resp.Answer, &dns.AAAA{
-					Hdr:  dns.RR_Header{Name: q.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: h.cfg.TTL},
-					AAAA: ip.AsSlice(),
+					Hdr:  dns.Header{Name: name, Class: dns.ClassINET, TTL: h.cfg.TTL},
+					AAAA: rdata.AAAA{Addr: ip},
 				})
 			}
 		}
@@ -210,8 +246,8 @@ func (h *dnsHandler) writeAddrAnswers(resp *dns.Msg, q dns.Question, ips []netip
 	case dns.TypeANY:
 		// Minimal response according to RFC 8482.
 		resp.Answer = append(resp.Answer, &dns.HINFO{
-			Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeHINFO, Class: dns.ClassINET, Ttl: h.cfg.TTL},
-			Cpu: "RFC8482",
+			Hdr:   dns.Header{Name: name, Class: dns.ClassINET, TTL: h.cfg.TTL},
+			HINFO: rdata.HINFO{Cpu: "RFC8482"},
 		})
 	}
 
@@ -223,8 +259,8 @@ func (h *dnsHandler) writeAddrAnswers(resp *dns.Msg, q dns.Question, ips []netip
 }
 
 // handleApex processes requests for the zone apex.
-func (h *dnsHandler) handleApex(m *dns.Msg, q dns.Question) {
-	switch q.Qtype {
+func (h *dnsHandler) handleApex(m *dns.Msg, qtype uint16) {
+	switch qtype {
 	case dns.TypeSOA:
 		m.Answer = append(m.Answer, h.soaRR())
 		m.Ns = append(m.Ns, h.nsRRs()...)
@@ -248,14 +284,14 @@ func (h *dnsHandler) handleApex(m *dns.Msg, q dns.Question) {
 // handleInZoneNameserver handles queries for an in-zone nameserver.
 //
 // It constructs the nameserver address from the glue records.
-func (h *dnsHandler) handleInZoneNameserver(m *dns.Msg, q dns.Question, ns NSConfig) {
-	switch q.Qtype {
+func (h *dnsHandler) handleInZoneNameserver(m *dns.Msg, name string, qtype uint16, ns NSConfig) {
+	switch qtype {
 	case dns.TypeA:
 		for _, glue := range ns.Glue {
 			if glue.Is4() {
 				m.Answer = append(m.Answer, &dns.A{
-					Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: h.cfg.TTL},
-					A:   glue.AsSlice(),
+					Hdr: dns.Header{Name: name, Class: dns.ClassINET, TTL: h.cfg.TTL},
+					A:   rdata.A{Addr: glue},
 				})
 			}
 		}
@@ -264,8 +300,8 @@ func (h *dnsHandler) handleInZoneNameserver(m *dns.Msg, q dns.Question, ns NSCon
 		for _, glue := range ns.Glue {
 			if glue.Is6() {
 				m.Answer = append(m.Answer, &dns.AAAA{
-					Hdr:  dns.RR_Header{Name: q.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: h.cfg.TTL},
-					AAAA: glue.AsSlice(),
+					Hdr:  dns.Header{Name: name, Class: dns.ClassINET, TTL: h.cfg.TTL},
+					AAAA: rdata.AAAA{Addr: glue},
 				})
 			}
 		}
@@ -273,8 +309,8 @@ func (h *dnsHandler) handleInZoneNameserver(m *dns.Msg, q dns.Question, ns NSCon
 	case dns.TypeANY:
 		// Minimal response according to RFC 8482.
 		m.Answer = append(m.Answer, &dns.HINFO{
-			Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeHINFO, Class: dns.ClassINET, Ttl: h.cfg.TTL},
-			Cpu: "RFC8482",
+			Hdr:   dns.Header{Name: name, Class: dns.ClassINET, TTL: h.cfg.TTL},
+			HINFO: rdata.HINFO{Cpu: "RFC8482"},
 		})
 	}
 
@@ -291,14 +327,16 @@ func (h *dnsHandler) handleInZoneNameserver(m *dns.Msg, q dns.Question, ns NSCon
 // (there is always at least one nameserver).
 func (h *dnsHandler) soaRR() *dns.SOA {
 	return &dns.SOA{
-		Hdr:     dns.RR_Header{Name: h.cfg.Zone, Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: h.cfg.SOA.TTL},
-		Ns:      h.cfg.Nameservers[0].FQDN,
-		Mbox:    h.cfg.SOA.Email,
-		Serial:  h.store.Serial(),
-		Refresh: h.cfg.SOA.Refresh,
-		Retry:   h.cfg.SOA.Retry,
-		Expire:  h.cfg.SOA.Expire,
-		Minttl:  h.cfg.SOA.NegativeTTL,
+		Hdr: dns.Header{Name: h.cfg.Zone, Class: dns.ClassINET, TTL: h.cfg.SOA.TTL},
+		SOA: rdata.SOA{
+			Ns:      h.cfg.Nameservers[0].FQDN,
+			Mbox:    h.cfg.SOA.Email,
+			Serial:  h.store.Serial(),
+			Refresh: h.cfg.SOA.Refresh,
+			Retry:   h.cfg.SOA.Retry,
+			Expire:  h.cfg.SOA.Expire,
+			Minttl:  h.cfg.SOA.NegativeTTL,
+		},
 	}
 }
 
@@ -307,8 +345,8 @@ func (h *dnsHandler) nsRRs() []dns.RR {
 	rrs := make([]dns.RR, 0, len(h.cfg.Nameservers))
 	for _, ns := range h.cfg.Nameservers {
 		rrs = append(rrs, &dns.NS{
-			Hdr: dns.RR_Header{Name: h.cfg.Zone, Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: h.cfg.TTL},
-			Ns:  dns.Fqdn(ns.FQDN),
+			Hdr: dns.Header{Name: h.cfg.Zone, Class: dns.ClassINET, TTL: h.cfg.TTL},
+			NS:  rdata.NS{Ns: dnsutil.Fqdn(ns.FQDN)},
 		})
 	}
 
@@ -318,21 +356,21 @@ func (h *dnsHandler) nsRRs() []dns.RR {
 // appendGlue appends glue records to the DNS message for in-zone nameservers.
 func (h *dnsHandler) appendGlue(m *dns.Msg) {
 	for _, ns := range h.cfg.Nameservers {
-		fqdn := dns.Fqdn(ns.FQDN)
-		if !dns.IsSubDomain(h.cfg.Zone, strings.ToLower(fqdn)) {
+		fqdn := dnsutil.Fqdn(ns.FQDN)
+		if !dnsutil.IsBelow(h.cfg.Zone, strings.ToLower(fqdn)) {
 			continue
 		}
 
 		for _, glue := range ns.Glue {
 			if glue.Is4() {
 				m.Extra = append(m.Extra, &dns.A{
-					Hdr: dns.RR_Header{Name: fqdn, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: h.cfg.TTL},
-					A:   glue.AsSlice(),
+					Hdr: dns.Header{Name: fqdn, Class: dns.ClassINET, TTL: h.cfg.TTL},
+					A:   rdata.A{Addr: glue},
 				})
 			} else {
 				m.Extra = append(m.Extra, &dns.AAAA{
-					Hdr:  dns.RR_Header{Name: fqdn, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: h.cfg.TTL},
-					AAAA: glue.AsSlice(),
+					Hdr:  dns.Header{Name: fqdn, Class: dns.ClassINET, TTL: h.cfg.TTL},
+					AAAA: rdata.AAAA{Addr: glue},
 				})
 			}
 		}
@@ -344,8 +382,8 @@ func (h *dnsHandler) appendGlue(m *dns.Msg) {
 func StartDNS(ctx context.Context, cfg DNSConfig, store *Store, ready func() bool) error {
 	tm := 5 * time.Second
 	h := newDNSHandler(cfg, store, ctrl.Log.WithName("dns"), ready)
-	udp := &dns.Server{Addr: cfg.BindAddr, Net: "udp", Handler: h, ReadTimeout: tm, WriteTimeout: tm}
-	tcp := &dns.Server{Addr: cfg.BindAddr, Net: "tcp", Handler: h, ReadTimeout: tm, WriteTimeout: tm}
+	udp := &dns.Server{Addr: cfg.BindAddr, Net: "udp", Handler: h, ReadTimeout: tm}
+	tcp := &dns.Server{Addr: cfg.BindAddr, Net: "tcp", Handler: h, ReadTimeout: tm}
 
 	eg, egctx := errgroup.WithContext(ctx)
 
@@ -353,11 +391,17 @@ func StartDNS(ctx context.Context, cfg DNSConfig, store *Store, ready func() boo
 		startOnce := sync.Once{}
 		startedCh := make(chan struct{})
 		closeStarted := func() { startOnce.Do(func() { close(startedCh) }) }
-		srv.NotifyStartedFunc = closeStarted
+
+		// started reports whether the server actually began serving.
+		started := atomic.Bool{}
+		srv.NotifyStartedFunc = func(context.Context) {
+			started.Store(true)
+			closeStarted()
+		}
 
 		eg.Go(func() error {
 			err := srv.ListenAndServe()
-			closeStarted() // Send the cancellation after the server stops.
+			closeStarted() // Unblock the shutdown goroutine if the server never started.
 			if err != nil {
 				return fmt.Errorf("serving DNS server (%v): %w", srv.Net, err)
 			}
@@ -369,12 +413,14 @@ func StartDNS(ctx context.Context, cfg DNSConfig, store *Store, ready func() boo
 			<-egctx.Done()
 			<-startedCh // Also wait until the server has started or ListenAndServe has returned.
 
+			if !started.Load() {
+				return nil
+			}
+
 			sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 			defer cancel()
 
-			if err := srv.ShutdownContext(sctx); err != nil {
-				h.log.Error(err, "failed to shut down DNS server", "network", srv.Net)
-			}
+			srv.Shutdown(sctx)
 
 			return nil
 		})

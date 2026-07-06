@@ -9,31 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
 	"github.com/go-logr/logr"
-	"github.com/miekg/dns"
 )
-
-// testResponseWriter is a minimal dns.ResponseWriter for use in ServeDNS tests.
-type testResponseWriter struct {
-	network string // "udp" or "tcp"
-	msg     *dns.Msg
-}
-
-func (w *testResponseWriter) LocalAddr() net.Addr {
-	if w.network == "tcp" {
-		return &net.TCPAddr{}
-	}
-
-	return &net.UDPAddr{}
-}
-
-func (w *testResponseWriter) RemoteAddr() net.Addr        { return &net.UDPAddr{} }
-func (w *testResponseWriter) WriteMsg(m *dns.Msg) error   { w.msg = m; return nil }
-func (w *testResponseWriter) Write(b []byte) (int, error) { return len(b), nil }
-func (w *testResponseWriter) Close() error                { return nil }
-func (w *testResponseWriter) TsigStatus() error           { return nil }
-func (w *testResponseWriter) TsigTimersOnly(bool)         {}
-func (w *testResponseWriter) Hijack()                     {}
 
 // newTestHandler returns a dnsHandler wired to the given store.
 //
@@ -62,10 +41,9 @@ func newTestHandler(zone string, store *Store, nameservers ...NSConfig) *dnsHand
 func queryRoundtrip(t *testing.T, h *dnsHandler, qtype uint16, name string) *dns.Msg {
 	t.Helper()
 
-	req := &dns.Msg{}
-	req.SetQuestion(name, qtype)
-	resp := &dns.Msg{}
-	resp.SetReply(req)
+	req := dnsutil.SetQuestion(new(dns.Msg), name, qtype)
+	resp := new(dns.Msg)
+	dnsutil.SetReply(resp, req)
 
 	if err := h.processDNSMessage(req, resp); err != nil {
 		t.Fatalf("processing DNS message: %v", err)
@@ -78,16 +56,16 @@ func TestDNSEdns0(t *testing.T) {
 	t.Parallel()
 
 	h := newTestHandler("example.com.", NewStore())
-	req := &dns.Msg{}
-	req.SetEdns0(4096, false)
-	resp := &dns.Msg{}
-	resp.SetReply(req)
+	req := new(dns.Msg)
+	req.UDPSize = 4096
+	resp := new(dns.Msg)
+	dnsutil.SetReply(resp, req)
 
 	if err := h.processDNSMessage(req, resp); err != nil {
 		t.Fatalf("processing DNS message: %v", err)
 	}
 
-	if resp.IsEdns0() == nil {
+	if resp.UDPSize == 0 {
 		t.Error("expected EDNS0 record")
 	}
 }
@@ -95,9 +73,9 @@ func TestDNSEdns0(t *testing.T) {
 func TestDNSInvalidQuestions(t *testing.T) {
 	t.Parallel()
 
-	questions := [][]dns.Question{nil, {
-		{Name: "example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET},
-		{Name: "example.com.", Qtype: dns.TypeAAAA, Qclass: dns.ClassINET},
+	questions := [][]dns.RR{nil, {
+		&dns.A{Hdr: dns.Header{Name: "example.com.", Class: dns.ClassINET}},
+		&dns.AAAA{Hdr: dns.Header{Name: "example.com.", Class: dns.ClassINET}},
 	}}
 
 	for _, q := range questions {
@@ -105,10 +83,10 @@ func TestDNSInvalidQuestions(t *testing.T) {
 			t.Parallel()
 
 			h := newTestHandler("example.com.", NewStore())
-			req := &dns.Msg{}
+			req := new(dns.Msg)
 			req.Question = q
-			resp := &dns.Msg{}
-			resp.SetReply(req)
+			resp := new(dns.Msg)
+			dnsutil.SetReply(resp, req)
 
 			if err := h.processDNSMessage(req, resp); err != nil {
 				t.Fatalf("processing DNS message: %v", err)
@@ -125,10 +103,10 @@ func TestDNSInvalidClass(t *testing.T) {
 	t.Parallel()
 
 	h := newTestHandler("example.com.", NewStore())
-	req := &dns.Msg{}
-	req.Question = []dns.Question{{Name: "example.com.", Qtype: dns.TypeA, Qclass: dns.ClassCHAOS}}
-	resp := &dns.Msg{}
-	resp.SetReply(req)
+	req := new(dns.Msg)
+	req.Question = []dns.RR{&dns.A{Hdr: dns.Header{Name: "example.com.", Class: dns.ClassCHAOS}}}
+	resp := new(dns.Msg)
+	dnsutil.SetReply(resp, req)
 
 	if err := h.processDNSMessage(req, resp); err != nil {
 		t.Fatalf("processing DNS message: %v", err)
@@ -267,13 +245,13 @@ func TestDNSGlueInZone(t *testing.T) {
 	var ipv4Found, ipv6Found bool
 	for _, rr := range resp.Extra {
 		if a, ok := rr.(*dns.A); ok {
-			if a.A.String() == "1.2.3.4" {
+			if a.Addr.String() == "1.2.3.4" {
 				ipv4Found = true
 			}
 		}
 
 		if a, ok := rr.(*dns.AAAA); ok {
-			if a.AAAA.String() == "2001:db8::1" {
+			if a.Addr.String() == "2001:db8::1" {
 				ipv6Found = true
 			}
 		}
@@ -366,8 +344,8 @@ func TestDNSAreaReturnsIPs(t *testing.T) {
 						t.Errorf("unexpected non-A record in answer section: %T", rr)
 					}
 
-					if a.A.String() != "1.2.3.4" {
-						t.Errorf("unexpected IP address: %v", a.A.String())
+					if a.Addr.String() != "1.2.3.4" {
+						t.Errorf("unexpected IP address: %v", a.Addr.String())
 					}
 
 				case dns.TypeAAAA:
@@ -376,8 +354,8 @@ func TestDNSAreaReturnsIPs(t *testing.T) {
 						t.Errorf("unexpected non-AAAA record in answer section: %T", rr)
 					}
 
-					if aaaa.AAAA.String() != "2001:db8::1" {
-						t.Errorf("unexpected IP address: %v", aaaa.AAAA.String())
+					if aaaa.Addr.String() != "2001:db8::1" {
+						t.Errorf("unexpected IP address: %v", aaaa.Addr.String())
 					}
 				}
 			}
@@ -404,7 +382,7 @@ func TestDNSServiceReturnsIPs(t *testing.T) {
 	}
 
 	a, ok := resp.Answer[0].(*dns.A)
-	if !ok || a.A.String() != "10.30.0.2" {
+	if !ok || a.Addr.String() != "10.30.0.2" {
 		t.Errorf("unexpected answer: %v", resp.Answer[0])
 	}
 }
@@ -546,27 +524,20 @@ func TestDNSUDPTruncation(t *testing.T) {
 	populateLargeArea(store, 50)
 
 	h := newTestHandler("example.com.", store)
-	req := &dns.Msg{}
-	req.SetQuestion("home.example.com.", dns.TypeA)
+	req := dnsutil.SetQuestion(new(dns.Msg), "home.example.com.", dns.TypeA)
 
-	w := &testResponseWriter{network: "udp"}
-	h.ServeDNS(w, req)
+	resp := h.buildReply(req, true)
 
-	if w.msg == nil {
-		t.Fatal("no response written")
-	}
-
-	if !w.msg.Truncated {
+	if !resp.Truncated {
 		t.Error("expected TC bit to be set for oversized UDP response")
 	}
 
-	packed, err := w.msg.Pack()
-	if err != nil {
+	if err := resp.Pack(); err != nil {
 		t.Fatalf("packing truncated response: %v", err)
 	}
 
-	if len(packed) > dns.MinMsgSize {
-		t.Errorf("response is too large after truncation (%v bytes): want at most %v bytes", len(packed), dns.MinMsgSize)
+	if len(resp.Data) > dns.MinMsgSize {
+		t.Errorf("response is too large after truncation (%v bytes): want at most %v bytes", len(resp.Data), dns.MinMsgSize)
 	}
 }
 
@@ -577,22 +548,16 @@ func TestDNSTCPNoTruncation(t *testing.T) {
 	populateLargeArea(store, 50)
 
 	h := newTestHandler("example.com.", store)
-	req := &dns.Msg{}
-	req.SetQuestion("home.example.com.", dns.TypeA)
+	req := dnsutil.SetQuestion(new(dns.Msg), "home.example.com.", dns.TypeA)
 
-	w := &testResponseWriter{network: "tcp"}
-	h.ServeDNS(w, req)
+	resp := h.buildReply(req, false)
 
-	if w.msg == nil {
-		t.Fatal("no response written")
-	}
-
-	if w.msg.Truncated {
+	if resp.Truncated {
 		t.Error("TC bit must not be set for TCP responses")
 	}
 
-	if len(w.msg.Answer) != 50 {
-		t.Errorf("expected all 50 answers in TCP response, got %v", len(w.msg.Answer))
+	if len(resp.Answer) != 50 {
+		t.Errorf("expected all 50 answers in TCP response, got %v", len(resp.Answer))
 	}
 }
 
@@ -650,10 +615,12 @@ func TestStartDNS(t *testing.T) {
 	}()
 
 	// Poll UDP until the server is ready.
-	req := &dns.Msg{}
-	req.SetQuestion("home.example.com.", dns.TypeA)
+	newReq := func() *dns.Msg {
+		return dnsutil.SetQuestion(new(dns.Msg), "home.example.com.", dns.TypeA)
+	}
 
-	udpClient := &dns.Client{Net: "udp", Timeout: 500 * time.Millisecond}
+	udpClient := dns.NewClient()
+	udpClient.ReadTimeout = 500 * time.Millisecond
 
 	var (
 		udpResp *dns.Msg
@@ -661,7 +628,9 @@ func TestStartDNS(t *testing.T) {
 	)
 
 	for range 40 {
-		udpResp, _, lastErr = udpClient.Exchange(req, addr)
+		ectx, ecancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		udpResp, _, lastErr = udpClient.Exchange(ectx, newReq(), "udp", addr)
+		ecancel()
 		if lastErr == nil {
 			break
 		}
@@ -683,9 +652,13 @@ func TestStartDNS(t *testing.T) {
 	}
 
 	// Verify that the TCP server is also up.
-	tcpClient := &dns.Client{Net: "tcp", Timeout: 2 * time.Second}
+	tcpClient := dns.NewClient()
+	tcpClient.ReadTimeout = 2 * time.Second
 
-	tcpResp, _, err := tcpClient.Exchange(req, addr)
+	tctx, tcancel := context.WithTimeout(ctx, 2*time.Second)
+	defer tcancel()
+
+	tcpResp, _, err := tcpClient.Exchange(tctx, newReq(), "tcp", addr)
 	if err != nil {
 		t.Fatalf("TCP query failed: %v", err)
 	}
@@ -766,7 +739,7 @@ func TestDNSMultipleNameservers(t *testing.T) {
 
 	// Check if glue is present for ns1, since it is in-zone.
 	for _, rr := range resp.Extra {
-		if a, ok := rr.(*dns.A); ok && a.A.String() == "1.1.1.1" {
+		if a, ok := rr.(*dns.A); ok && a.Addr.String() == "1.1.1.1" {
 			return
 		}
 	}
@@ -810,8 +783,8 @@ func TestDNSInZoneNS(t *testing.T) {
 					t.Errorf("expected A record in answer section, got %T", resp.Answer[0])
 				}
 
-				if a.A.String() != test.expectedIP {
-					t.Errorf("unexpected IP: got %v, want %v", a.A.String(), test.expectedIP)
+				if a.Addr.String() != test.expectedIP {
+					t.Errorf("unexpected IP: got %v, want %v", a.Addr.String(), test.expectedIP)
 				}
 
 			case dns.TypeAAAA:
@@ -820,8 +793,8 @@ func TestDNSInZoneNS(t *testing.T) {
 					t.Errorf("expected AAA record in answer section, got %T", resp.Answer[0])
 				}
 
-				if aaaa.AAAA.String() != test.expectedIP {
-					t.Errorf("unexpected IP: got %v, want %v", aaaa.AAAA.String(), test.expectedIP)
+				if aaaa.Addr.String() != test.expectedIP {
+					t.Errorf("unexpected IP: got %v, want %v", aaaa.Addr.String(), test.expectedIP)
 				}
 			}
 		})
@@ -881,7 +854,7 @@ func TestDNSInZoneNSPriority(t *testing.T) {
 		t.Errorf("expected A record in answer section, got %T", resp.Answer[0])
 	}
 
-	if a.A.String() != "1.2.3.4" {
-		t.Errorf("expected NS address 1.2.3.4 but got %v", a.A.String())
+	if a.Addr.String() != "1.2.3.4" {
+		t.Errorf("expected NS address 1.2.3.4 but got %v", a.Addr.String())
 	}
 }

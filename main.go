@@ -13,7 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -209,7 +209,7 @@ func parseNameservers(s, zone string) ([]NSConfig, error) {
 
 	// All in-zone NS should have glue records.
 	for _, ns := range nameservers {
-		if dns.IsSubDomain(zone, ns.FQDN) && len(ns.Glue) == 0 {
+		if dnsutil.IsBelow(zone, ns.FQDN) && len(ns.Glue) == 0 {
 			return nil, fmt.Errorf("nameserver %v is in-zone but has no glue records", ns.FQDN)
 		}
 	}
