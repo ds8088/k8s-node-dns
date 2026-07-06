@@ -14,11 +14,14 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/miekg/dns"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	crconfig "sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
@@ -52,6 +55,7 @@ func TestMain(m *testing.M) {
 	if shouldRunIntegrationTests() {
 		scheme := runtime.NewScheme()
 		utilruntime.Must(corev1.AddToScheme(scheme))
+		utilruntime.Must(discoveryv1.AddToScheme(scheme))
 
 		testEnv = &envtest.Environment{}
 		cfg, err := testEnv.Start()
@@ -325,6 +329,185 @@ func TestIntegrationNodeReconciler(t *testing.T) {
 	if err := <-mgrErrCh; err != nil {
 		t.Errorf("manager exited with error: %v", err)
 	}
+}
+
+// TestIntegrationServiceReconciler runs the full reconcile loop against a real k8s API server
+// for the Service/EndpointSlice path.
+//
+// It checks the exact scenario of a single replica that moves between nodes, followed by a node failure.
+func TestIntegrationServiceReconciler(t *testing.T) {
+	if !shouldRunIntegrationTests() {
+		t.Skip("RUN_INTEGRATION_TESTS env var is not set, skipping integration tests")
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+
+	scheme := runtime.NewScheme()
+	utilruntime.Must(corev1.AddToScheme(scheme))
+	utilruntime.Must(discoveryv1.AddToScheme(scheme))
+
+	cfg := testEnv.Config
+	store := NewStore()
+
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+		Scheme:  scheme,
+		Metrics: metricsserver.Options{BindAddress: "0"},
+		// The node-dns controller name is also registered by
+		// TestIntegrationNodeReconciler in the same process.
+		Controller: crconfig.Controller{SkipNameValidation: new(true)},
+	})
+	if err != nil {
+		t.Fatalf("creating manager: %v", err)
+	}
+
+	const (
+		areasAnn = "k8s.pootis.network/areas"
+		ipsAnn   = "k8s.pootis.network/ips"
+		dnsAnn   = "k8s.pootis.network/dns"
+	)
+
+	if err := NewNodeReconciler(mgr.GetClient(), store, areasAnn, ipsAnn).SetupWithManager(mgr); err != nil {
+		t.Fatalf("setting up node reconciler: %v", err)
+	}
+
+	if err := NewServiceReconciler(mgr.GetClient(), store, dnsAnn).SetupWithManager(mgr); err != nil {
+		t.Fatalf("setting up service reconciler: %v", err)
+	}
+
+	const (
+		dnsZone = "lb.pootis.network."
+		svcNS   = "default"
+		svcName = "git"
+		qname   = svcName + "." + svcNS + "." + dnsZone
+	)
+
+	dnsAddr := startTestDNSServer(t, store, dnsZone)
+
+	mgrErrCh := make(chan error, 1)
+	go func() {
+		defer close(mgrErrCh)
+		if startErr := mgr.Start(ctx); startErr != nil {
+			mgrErrCh <- startErr
+		}
+	}()
+
+	// Two ready nodes, each with a distinct external IP.
+	for name, ip := range map[string]string{"snode1": "1.1.1.1", "snode2": "2.2.2.2"} {
+		node := &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        name,
+				Annotations: map[string]string{ipsAnn: ip},
+			},
+		}
+		if err := k8sClient.Create(ctx, node); err != nil {
+			t.Fatalf("creating node %v: %v", name, err)
+		}
+
+		patch := client.MergeFrom(node.DeepCopy())
+		node.Status.Conditions = []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}
+		if err := k8sClient.Status().Patch(ctx, node, patch); err != nil {
+			t.Fatalf("patching node %v status: %v", name, err)
+		}
+	}
+
+	// An annotated, headless Service.
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:   svcNS,
+			Name:        svcName,
+			Annotations: map[string]string{dnsAnn: "true"},
+		},
+		Spec: corev1.ServiceSpec{
+			ClusterIP: corev1.ClusterIPNone,
+			Ports:     []corev1.ServicePort{{Port: 80}},
+		},
+	}
+	if err := k8sClient.Create(ctx, svc); err != nil {
+		t.Fatalf("creating service: %v", err)
+	}
+
+	// endpointSliceOn returns a one-endpoint slice hosted on the node.
+	endpointSliceOn := func(node string) *discoveryv1.EndpointSlice {
+		return &discoveryv1.EndpointSlice{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: svcNS,
+				Name:      svcName + "-slice",
+				Labels:    map[string]string{discoveryv1.LabelServiceName: svcName},
+			},
+			AddressType: discoveryv1.AddressTypeIPv4,
+			Endpoints: []discoveryv1.Endpoint{{
+				Addresses:  []string{"10.20.0.1"},
+				Conditions: discoveryv1.EndpointConditions{Ready: new(true)},
+				NodeName:   new(node),
+			}},
+		}
+	}
+
+	// 1. First, replica lands on snode1. The record must resolve to 1.1.1.1.
+	slice := endpointSliceOn("snode1")
+	if err := k8sClient.Create(ctx, slice); err != nil {
+		t.Fatalf("creating endpointslice: %v", err)
+	}
+
+	if !pollCondition(t, func() bool {
+		return singleAAnswer(dnsAddr, qname) == "1.1.1.1"
+	}) {
+		t.Error("expected git service to resolve to 1.1.1.1 while hosted on snode1")
+	}
+
+	// 2. Replica moves to snode2. The record resolves to 2.2.2.2.
+	patch := client.MergeFrom(slice.DeepCopy())
+	slice.Endpoints[0].NodeName = new("snode2")
+	if err := k8sClient.Patch(ctx, slice, patch); err != nil {
+		t.Fatalf("patching endpointslice to snode2: %v", err)
+	}
+
+	if !pollCondition(t, func() bool {
+		return singleAAnswer(dnsAddr, qname) == "2.2.2.2"
+	}) {
+		t.Error("expected git service to resolve to 2.2.2.2 after the replica moved to snode2")
+	}
+
+	// 3. snode2 fails. Record becomes empty (NODATA).
+	node2 := &corev1.Node{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: "snode2"}, node2); err != nil {
+		t.Fatalf("getting snode2: %v", err)
+	}
+
+	patch = client.MergeFrom(node2.DeepCopy())
+	node2.Status.Conditions = []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionFalse}}
+	if err := k8sClient.Status().Patch(ctx, node2, patch); err != nil {
+		t.Fatalf("patching snode2 to NotReady: %v", err)
+	}
+
+	if !pollCondition(t, func() bool {
+		resp, err := dnsExchange(dnsAddr, qname, dns.TypeA)
+		return err == nil && resp.Rcode == dns.RcodeSuccess && len(resp.Answer) == 0
+	}) {
+		t.Error("expected NODATA for git service after its only node failed")
+	}
+
+	cancel()
+	if err := <-mgrErrCh; err != nil {
+		t.Errorf("manager exited with error: %v", err)
+	}
+}
+
+// singleAAnswer queries addr for qname and returns the single A record in a successful response,
+// or "" if the response is not a single-A NOERROR.
+func singleAAnswer(addr, qname string) string {
+	resp, err := dnsExchange(addr, qname, dns.TypeA)
+	if err != nil || resp.Rcode != dns.RcodeSuccess || len(resp.Answer) != 1 {
+		return ""
+	}
+
+	a, ok := resp.Answer[0].(*dns.A)
+	if !ok {
+		return ""
+	}
+
+	return a.A.String()
 }
 
 // pollCondition polls a condition callback until it returns true or timeout of 15 seconds elapses.

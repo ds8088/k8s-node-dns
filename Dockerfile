@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
 
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
@@ -16,7 +16,7 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build \
     -o k8s-node-dns \
     .
 
-FROM alpine:3.23
+FROM alpine:3.24
 
 COPY --from=builder /opt/build/k8s-node-dns /opt/k8s-node-dns
 

@@ -55,7 +55,7 @@ func newTestHandler(zone string, store *Store, nameservers ...NSConfig) *dnsHand
 			Expire:      86400,
 			NegativeTTL: 30,
 		},
-	}, store, logr.Discard())
+	}, store, logr.Discard(), nil)
 }
 
 // queryRoundtrip sends a single-question DNS query to the handler and waits for a response.
@@ -385,6 +385,89 @@ func TestDNSAreaReturnsIPs(t *testing.T) {
 	}
 }
 
+func TestDNSServiceReturnsIPs(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore()
+	store.Update("node1", nil, []netip.Addr{netip.MustParseAddr("10.30.0.2")}, true)
+	store.UpdateService(svcKey("default", "git"), []string{"node1"})
+
+	h := newTestHandler("example.com.", store)
+	resp := queryRoundtrip(t, h, dns.TypeA, "git.default.example.com.")
+
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Errorf("unexpected DNS code: got %v, expected NOERROR", dns.RcodeToString[resp.Rcode])
+	}
+
+	if len(resp.Answer) != 1 {
+		t.Fatalf("expected 1 answer, got %v", len(resp.Answer))
+	}
+
+	a, ok := resp.Answer[0].(*dns.A)
+	if !ok || a.A.String() != "10.30.0.2" {
+		t.Errorf("unexpected answer: %v", resp.Answer[0])
+	}
+}
+
+func TestDNSServiceUnknown(t *testing.T) {
+	t.Parallel()
+
+	h := newTestHandler("example.com.", NewStore())
+	resp := queryRoundtrip(t, h, dns.TypeA, "git.default.example.com.")
+
+	if resp.Rcode != dns.RcodeNameError {
+		t.Errorf("unexpected DNS code: got %v, expected NXDOMAIN", dns.RcodeToString[resp.Rcode])
+	}
+}
+
+func TestDNSServiceKnownButEmpty(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore()
+	// Service is known but its hosting node is not ready, so we expect NODATA.
+	store.Update("node1", nil, []netip.Addr{netip.MustParseAddr("10.30.0.1")}, false)
+	store.UpdateService(svcKey("default", "git"), []string{"node1"})
+
+	h := newTestHandler("example.com.", store)
+	resp := queryRoundtrip(t, h, dns.TypeA, "git.default.example.com.")
+
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Errorf("unexpected DNS code: got %v, expected NOERROR", dns.RcodeToString[resp.Rcode])
+	}
+
+	if len(resp.Answer) != 0 {
+		t.Errorf("expected empty answer for a known service with no ready node, got %v", resp.Answer)
+	}
+
+	for _, rr := range resp.Ns {
+		if _, ok := rr.(*dns.SOA); ok {
+			return
+		}
+	}
+
+	t.Error("expected SOA in authority section for NODATA response")
+}
+
+func TestDNSNotReadyServfail(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore()
+	store.Update("node1", []string{"home"}, []netip.Addr{netip.MustParseAddr("10.30.0.1")}, true)
+
+	// Create a handler that is perpetually non-ready.
+	h := newDNSHandler(DNSConfig{
+		Zone:        "example.com.",
+		TTL:         30,
+		Nameservers: []NSConfig{{FQDN: "ns.example.com."}},
+		SOA:         SOAConfig{Email: "admin.example.com.", NegativeTTL: 30},
+	}, store, logr.Discard(), func() bool { return false })
+
+	resp := queryRoundtrip(t, h, dns.TypeA, "home.example.com.")
+	if resp.Rcode != dns.RcodeServerFailure {
+		t.Errorf("unexpected DNS code: got %v, expected SERVFAIL", dns.RcodeToString[resp.Rcode])
+	}
+}
+
 func TestDNSRFC8482(t *testing.T) {
 	t.Parallel()
 
@@ -563,7 +646,7 @@ func TestStartDNS(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- StartDNS(ctx, newStartDNSConfig(addr), store)
+		errCh <- StartDNS(ctx, newStartDNSConfig(addr), store, nil)
 	}()
 
 	// Poll UDP until the server is ready.
@@ -643,7 +726,7 @@ func TestStartDNSBindError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
-	if err := StartDNS(ctx, newStartDNSConfig(addr), NewStore()); err == nil {
+	if err := StartDNS(ctx, newStartDNSConfig(addr), NewStore(), nil); err == nil {
 		t.Error("expected StartDNS to return an error when the address is already in use")
 	}
 }

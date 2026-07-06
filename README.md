@@ -45,12 +45,36 @@ Each node may carry two annotations (you should set your own annotation keys, th
 
 The annotation keys can be changed with the `--areas-annotation` and `--ips-annotation` flags.
 
+The controller can additionally track individual workloads by using annotated Services; see [Service records](#service-records) below.
+
 For zone `lb.pootis.network.` and an area `home`, querying `home.lb.pootis.network.` returns A/AAAA records for all ready nodes that list `home` in their areas annotation.
 The zone apex serves SOA and NS records.
 
+## Service records
+
+The controller is capable of advertising a DNS record that tracks a workload (Deployment, StatefulSet and such) as it moves between nodes.
+
+To opt-in, annotate a `Service` with `k8s.pootis.network/dns: "true"` (the key is configurable via `--service-annotation`).
+
+The controller will then serve a record at `<service>.<namespace>.<zone>`, and that record resolves to the external IPs
+(from the node IPs annotation) that belong to every node that currently hosts a ready endpoint of that Service,
+also taking node readiness into account.
+
+This works with any Service that has endpoints, even a headless Service, regardless of the workload behind it.
+
+Example:
+  - a single-replica Deployment is gated behind a Service `git` in namespace `apps`;
+  - a client queries `git.apps.lb.pootis.network.`;
+  - the DNS server returns the external IP of the node (or nodes, if there were multiple replicas) that currently run the pod,
+    and the DNS response becomes empty (NODATA) if there are no ready replicas anywhere.
+
+The Service controller mirrors kube-proxy's terminating-endpoints behavior: if a Service has no ready endpoints,
+the controller tries to falls back to endpoints that are still serving while terminating (serving-terminating state),
+and only then it will bail with NODATA.
+
 ## Permissions
 
-The controller requires read access to `Node` objects by the means of a ClusterRole:
+The controller requires read access to `Node`, `Service`, and `EndpointSlice` objects by the means of a ClusterRole:
 
 ```yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -62,13 +86,20 @@ rules:
       - ""
     resources:
       - nodes
+      - services
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - discovery.k8s.io
+    resources:
+      - endpointslices
     verbs:
       - get
       - list
       - watch
 ```
-
-If leader election is enabled (`--leader-elect`), the controller also needs permission to create and update `Lease` objects in its namespace.
 
 ## Helm chart
 
@@ -90,7 +121,7 @@ k8s-node-dns --zone lb.pootis.network --soa-email admin@pootis.network --soa-ns 
 
 ## Building from source
 
-Go 1.25+ is required.
+Go 1.26+ is required.
 
 ```sh
 go build ./...

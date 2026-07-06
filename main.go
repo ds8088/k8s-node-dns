@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -10,13 +11,16 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/miekg/dns"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
@@ -24,6 +28,7 @@ var scheme = runtime.NewScheme()
 
 func init() {
 	utilruntime.Must(corev1.AddToScheme(scheme))
+	utilruntime.Must(discoveryv1.AddToScheme(scheme))
 }
 
 func main() {
@@ -45,7 +50,7 @@ func main() {
 		areasAnnotation = flag.String("areas-annotation", "k8s.pootis.network/node-areas", "Node annotation key for area membership.")
 		ipsAnnotation   = flag.String("ips-annotation", "k8s.pootis.network/node-ips", "Node annotation key for IPs.")
 
-		leaderElect = flag.Bool("leader-elect", false, "Enable leader election.")
+		serviceAnnotation = flag.String("service-annotation", "k8s.pootis.network/dns", "Service annotation key that opts a Service into DNS management.")
 	)
 
 	opts := zap.Options{}
@@ -97,18 +102,21 @@ func main() {
 	}
 
 	ctx := ctrl.SetupSignalHandler()
+	ready := &atomic.Bool{}
 
 	go func() {
-		if dnsErr := StartDNS(ctx, dnsCfg, store); dnsErr != nil {
+		if dnsErr := StartDNS(ctx, dnsCfg, store, ready.Load); dnsErr != nil {
 			log.Error(dnsErr, "DNS server failed")
 			os.Exit(1)
 		}
 	}()
 
+	// This used to support leader election but it's best to elide it
+	// because it is not used: we never perform a cluster write,
+	// and every replica must always run the reconcilers to keep
+	// its own in-memory store populated so it can serve DNS.
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:           scheme,
-		LeaderElection:   *leaderElect,
-		LeaderElectionID: "k8s-node-dns-leader",
+		Scheme: scheme,
 		Metrics: metricsserver.Options{
 			BindAddress: "0", // "0" disables the metrics server
 		},
@@ -121,6 +129,28 @@ func main() {
 	nodeReconciler := NewNodeReconciler(mgr.GetClient(), store, *areasAnnotation, *ipsAnnotation)
 	if err := nodeReconciler.SetupWithManager(mgr); err != nil {
 		log.Error(err, "unable to setup node controller")
+		os.Exit(1)
+	}
+
+	serviceReconciler := NewServiceReconciler(mgr.GetClient(), store, *serviceAnnotation)
+	if err := serviceReconciler.SetupWithManager(mgr); err != nil {
+		log.Error(err, "unable to setup service controller")
+		os.Exit(1)
+	}
+
+	// Flip the readiness gate once the caches have synced.
+	if err := mgr.Add(manager.RunnableFunc(func(runCtx context.Context) error {
+		if !mgr.GetCache().WaitForCacheSync(runCtx) {
+			return errors.New("failed to wait for caches to sync")
+		}
+
+		ready.Store(true)
+		log.Info("informer caches synced; DNS server is now authoritative")
+
+		<-runCtx.Done()
+		return nil
+	})); err != nil {
+		log.Error(err, "unable to register cache-sync runnable function")
 		os.Exit(1)
 	}
 

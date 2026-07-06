@@ -5,6 +5,8 @@ import (
 	"slices"
 	"sync"
 	"time"
+
+	"k8s.io/apimachinery/pkg/types"
 )
 
 type storeNode struct {
@@ -13,17 +15,25 @@ type storeNode struct {
 	ready bool
 }
 
-// Store handles a map of all known Kubernetes nodes and their most recent state.
+// storeService holds the state of a single DNS-managed Service.
+type storeService struct {
+	nodes []string
+}
+
+// Store handles a map of all known Kubernetes nodes and DNS-managed Services,
+// along with their most recent state.
 type Store struct {
-	nodes  map[string]*storeNode
-	serial uint32
-	mu     sync.RWMutex
+	nodes    map[string]*storeNode
+	services map[types.NamespacedName]*storeService
+	serial   uint32
+	mu       sync.RWMutex
 }
 
 // NewStore creates an instance of Store.
 func NewStore() *Store {
 	return &Store{
-		nodes: map[string]*storeNode{},
+		nodes:    map[string]*storeNode{},
+		services: map[types.NamespacedName]*storeService{},
 	}
 }
 
@@ -86,6 +96,64 @@ func (s *Store) GetAreaIPs(area string) (ips []netip.Addr, ok bool) {
 	}
 
 	return
+}
+
+// UpdateService updates the store with the set of node names
+// each of which hosts endpoints for a Service.
+//
+// Nodes must be sorted and deduplicated by the caller so that
+// semantically-equal updates compare equal and do not bump the serial.
+func (s *Store) UpdateService(key types.NamespacedName, nodes []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if existing, ok := s.services[key]; ok && slices.Equal(existing.nodes, nodes) {
+		return
+	}
+
+	s.services[key] = &storeService{nodes: nodes}
+	s.increaseSerial()
+}
+
+// RemoveService removes a Service from the store.
+func (s *Store) RemoveService(key types.NamespacedName) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.services[key]; ok {
+		delete(s.services, key)
+		s.increaseSerial()
+	}
+}
+
+// GetServiceIPs returns the deduplicated IPs of all ready nodes
+// that host an advertised endpoint of the Service,
+// and also the result whether the Service is known by the store.
+func (s *Store) GetServiceIPs(namespace, name string) (ips []netip.Addr, ok bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	svc, ok := s.services[types.NamespacedName{Namespace: namespace, Name: name}]
+	if !ok {
+		return nil, false
+	}
+
+	seen := map[netip.Addr]struct{}{}
+	for _, nodeName := range svc.nodes {
+		node, exists := s.nodes[nodeName]
+		if !exists || !node.ready {
+			continue // Either an unknown or non-ready node; skip it.
+		}
+
+		for _, ip := range node.ips {
+			if _, isSeen := seen[ip]; !isSeen {
+				seen[ip] = struct{}{}
+				ips = append(ips, ip)
+			}
+		}
+	}
+
+	return ips, true
 }
 
 // Serial returns the current SOA serial.

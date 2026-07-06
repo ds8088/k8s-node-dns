@@ -47,12 +47,22 @@ type dnsHandler struct {
 	store *Store
 	log   logr.Logger
 
+	// ready reports if the store is authoritative and ready.
+	//
+	// If it returns false, the handler must answer with SERVFAIL
+	// so that resolvers do not negatively cache a bad response code.
+	//
+	// A nil ready is treated as always-ready (it is used by tests).
+	ready func() bool
+
 	inZoneNS map[string]NSConfig // In-zone nameservers, keyed by their lowercased FQDN
 }
 
 // newDNSHandler creates an instance of dnsHandler.
-func newDNSHandler(cfg DNSConfig, store *Store, log logr.Logger) *dnsHandler {
-	dh := &dnsHandler{cfg: cfg, store: store, log: log, inZoneNS: map[string]NSConfig{}}
+//
+// ready may be nil, in which case the handler is always considered ready.
+func newDNSHandler(cfg DNSConfig, store *Store, log logr.Logger, ready func() bool) *dnsHandler {
+	dh := &dnsHandler{cfg: cfg, store: store, log: log, ready: ready, inZoneNS: map[string]NSConfig{}}
 
 	for _, ns := range cfg.Nameservers {
 		lower := strings.ToLower(ns.FQDN)
@@ -95,6 +105,12 @@ func (h *dnsHandler) processDNSMessage(req, resp *dns.Msg) error {
 		resp.SetEdns0(4096, false)
 	}
 
+	// If the readiness callback is present and it returns false, reply with SERVFAIL.
+	if h.ready != nil && !h.ready() {
+		resp.SetRcode(req, dns.RcodeServerFailure)
+		return nil
+	}
+
 	// A DNS query must have exactly one question.
 	if len(req.Question) != 1 {
 		resp.SetRcode(req, dns.RcodeFormatError)
@@ -132,26 +148,44 @@ func (h *dnsHandler) processDNSMessage(req, resp *dns.Msg) error {
 		return nil
 	}
 
-	// Try to strip zone suffix; should return exactly one label (area name).
-	areaName := strings.TrimSuffix(qname, "."+h.cfg.Zone)
-	if areaName == "" || strings.Contains(areaName, ".") {
-		// Invalid area; send NXDOMAIN with SOA in authority.
+	// Strip the zone suffix and dispatch on the number of remaining labels:
+	//   - one label: "<area>" - this is an area record;
+	//   - two labels: "<service>.<ns>" - this is a Service record.
+	sub := strings.TrimSuffix(qname, "."+h.cfg.Zone)
+	labels := strings.Split(sub, ".")
+	ips := []netip.Addr{}
+	known := false
+
+	switch len(labels) {
+	case 1:
+		if labels[0] == "" {
+			break
+		}
+
+		ips, known = h.store.GetAreaIPs(labels[0])
+
+	case 2:
+		// Record is "<service>.<namespace>.<zone>".
+		ips, known = h.store.GetServiceIPs(labels[1], labels[0])
+	}
+
+	if !known {
+		// Unknown name; send NXDOMAIN with SOA in authority.
 		resp.SetRcode(req, dns.RcodeNameError)
 		resp.Ns = []dns.RR{h.soaRR()}
 		return nil
 	}
 
-	// Fetch IPs for this area.
-	ips, ok := h.store.GetAreaIPs(areaName)
-	if !ok {
-		// Unknown area; send NXDOMAIN with SOA in authority.
-		resp.SetRcode(req, dns.RcodeNameError)
-		resp.Ns = []dns.RR{h.soaRR()}
-		return nil
-	}
+	// Name is known (but it may resolve to no IPs).
+	h.writeAddrAnswers(resp, q, ips)
+	return nil
+}
 
-	// Area is known (but it may be empty).
-	// Iterate over IPs and build the answer section.
+// writeAddrAnswers builds the answer section for a known name that resolves to
+// a list of IPs, according to the query type.
+//
+// If no records match, it returns a NODATA response with the SOA in the authority section.
+func (h *dnsHandler) writeAddrAnswers(resp *dns.Msg, q dns.Question, ips []netip.Addr) {
 	switch q.Qtype {
 	case dns.TypeA:
 		for _, ip := range ips {
@@ -186,8 +220,6 @@ func (h *dnsHandler) processDNSMessage(req, resp *dns.Msg) error {
 	if len(resp.Answer) == 0 {
 		resp.Ns = []dns.RR{h.soaRR()}
 	}
-
-	return nil
 }
 
 // handleApex processes requests for the zone apex.
@@ -309,9 +341,9 @@ func (h *dnsHandler) appendGlue(m *dns.Msg) {
 
 // StartDNS starts TCP and UDP DNS servers and blocks until ctx is cancelled.
 // It returns an error if either server fails.
-func StartDNS(ctx context.Context, cfg DNSConfig, store *Store) error {
+func StartDNS(ctx context.Context, cfg DNSConfig, store *Store, ready func() bool) error {
 	tm := 5 * time.Second
-	h := newDNSHandler(cfg, store, ctrl.Log.WithName("dns"))
+	h := newDNSHandler(cfg, store, ctrl.Log.WithName("dns"), ready)
 	udp := &dns.Server{Addr: cfg.BindAddr, Net: "udp", Handler: h, ReadTimeout: tm, WriteTimeout: tm}
 	tcp := &dns.Server{Addr: cfg.BindAddr, Net: "tcp", Handler: h, ReadTimeout: tm, WriteTimeout: tm}
 

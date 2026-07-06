@@ -4,7 +4,13 @@ import (
 	"net/netip"
 	"slices"
 	"testing"
+
+	"k8s.io/apimachinery/pkg/types"
 )
+
+func svcKey(namespace, name string) types.NamespacedName {
+	return types.NamespacedName{Namespace: namespace, Name: name}
+}
 
 func TestStoreUnknownArea(t *testing.T) {
 	t.Parallel()
@@ -182,6 +188,128 @@ func TestStoreNodeInMultipleAreas(t *testing.T) {
 	_, ok := s.GetAreaIPs("invalid")
 	if ok {
 		t.Error("expected invalid area to be unknown")
+	}
+}
+
+func TestStoreUnknownService(t *testing.T) {
+	t.Parallel()
+
+	s := NewStore()
+	if _, ok := s.GetServiceIPs("default", "git"); ok {
+		t.Error("unknown service should not be present in store")
+	}
+}
+
+func TestStoreServiceReadyNode(t *testing.T) {
+	t.Parallel()
+
+	s := NewStore()
+	s.Update("node1", nil, []netip.Addr{netip.MustParseAddr("10.30.0.1")}, true)
+	s.UpdateService(svcKey("default", "git"), []string{"node1"})
+
+	ips, ok := s.GetServiceIPs("default", "git")
+	if !ok {
+		t.Fatal("expected service to be present in store")
+	}
+
+	if !slices.Equal(ips, []netip.Addr{netip.MustParseAddr("10.30.0.1")}) {
+		t.Errorf("got unexpected IPs from store: %v", ips)
+	}
+}
+
+func TestStoreServiceNodeNotReady(t *testing.T) {
+	t.Parallel()
+
+	s := NewStore()
+
+	// A non-ready node hosts the endpoint: service is known, but resolves to no IPs.
+	s.Update("node1", nil, []netip.Addr{netip.MustParseAddr("10.30.0.1")}, false)
+	s.UpdateService(svcKey("default", "git"), []string{"node1"})
+
+	ips, ok := s.GetServiceIPs("default", "git")
+	if !ok {
+		t.Fatal("expected service to be present in store")
+	}
+
+	if len(ips) != 0 {
+		t.Errorf("expected no IPs for service on a not-ready node, got %v", ips)
+	}
+}
+
+func TestStoreServiceNodeMissing(t *testing.T) {
+	t.Parallel()
+
+	s := NewStore()
+
+	// The service references a node that is not yet known to the store.
+	s.UpdateService(svcKey("default", "git"), []string{"node7"})
+
+	ips, ok := s.GetServiceIPs("default", "git")
+	if !ok {
+		t.Fatal("expected service to be present in store")
+	}
+
+	if len(ips) != 0 {
+		t.Errorf("expected no IPs when the node is unknown, got %v", ips)
+	}
+}
+
+func TestStoreServiceDeduplicatesIPs(t *testing.T) {
+	t.Parallel()
+
+	s := NewStore()
+	ip := netip.MustParseAddr("10.30.0.5")
+	s.Update("node1", nil, []netip.Addr{ip}, true)
+	s.Update("node2", nil, []netip.Addr{ip}, true)
+	s.UpdateService(svcKey("default", "git"), []string{"node1", "node2"})
+
+	ips, _ := s.GetServiceIPs("default", "git")
+	if len(ips) != 1 {
+		t.Errorf("expected 1 deduplicated IP, got %v: %v", len(ips), ips)
+	}
+}
+
+func TestStoreRemoveService(t *testing.T) {
+	t.Parallel()
+
+	s := NewStore()
+	s.UpdateService(svcKey("default", "git"), []string{"node1"})
+	s.RemoveService(svcKey("default", "git"))
+
+	if _, ok := s.GetServiceIPs("default", "git"); ok {
+		t.Error("expected service to be removed")
+	}
+}
+
+func TestStoreServiceSerialIdempotent(t *testing.T) {
+	t.Parallel()
+
+	s := NewStore()
+	s.UpdateService(svcKey("default", "git"), []string{"node1", "node2"})
+	before := s.Serial()
+
+	// Updates for the same node set must be idempotent and thus must not bump the serial.
+	s.UpdateService(svcKey("default", "git"), []string{"node1", "node2"})
+	if after := s.Serial(); after != before {
+		t.Errorf("serial changed after a no-op service update: before %v, after %v", before, after)
+	}
+
+	// But a different node set must bump the serial.
+	s.UpdateService(svcKey("default", "git"), []string{"node1"})
+	if after := s.Serial(); after <= before {
+		t.Errorf("serial did not increase after a changed service update: before %v, after %v", before, after)
+	}
+}
+
+func TestStoreRemoveServiceSerialOnNonexistent(t *testing.T) {
+	t.Parallel()
+
+	s := NewStore()
+	before := s.Serial()
+
+	s.RemoveService(svcKey("default", "git"))
+	if after := s.Serial(); after != before {
+		t.Errorf("serial changed after removing a nonexistent service: before %v, after %v", before, after)
 	}
 }
 
