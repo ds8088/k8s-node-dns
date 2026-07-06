@@ -1,6 +1,6 @@
 apiVersion: v2
 name: k8s-node-dns
-version: 1.0.0
+version: 1.1.0
 description: >
   A Kubernetes controller that serves DNS A/AAAA records, which resolve
   to the external IPs of all ready nodes in user-defined areas.
@@ -11,4 +11,4 @@ sources:
 maintainers:
   - name: ds8088
     url: https://pootis.network
-appVersion: 1.0.15
+appVersion: 1.1.0

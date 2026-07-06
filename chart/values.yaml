@@ -84,5 +84,8 @@ config:
   areasAnnotation: "k8s.pootis.network/node-areas"
   ipsAnnotation: "k8s.pootis.network/node-ips"
 
-  # Enable leader election, required if replicaCount > 1.
-  leaderElect: false
+  # Service annotation key that enables a Service's lifecycle
+  # to be tracked by the controller.
+  # A record for a Service with this annotation (which must be set to "true")
+  # is published at <service>.<namespace>.<zone>.
+  serviceAnnotation: "k8s.pootis.network/dns"

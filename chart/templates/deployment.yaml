@@ -74,9 +74,7 @@ spec:
             - --soa-neg-ttl={{ .Values.config.soa.negativeTTL }}
             - --areas-annotation={{ .Values.config.areasAnnotation }}
             - --ips-annotation={{ .Values.config.ipsAnnotation }}
-            {{- if .Values.config.leaderElect }}
-            - --leader-elect
-            {{- end }}
+            - --service-annotation={{ .Values.config.serviceAnnotation }}
           ports:
             - name: dns-udp
               containerPort: {{ .Values.config.port }}

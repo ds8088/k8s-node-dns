@@ -105,6 +105,7 @@ tests:
       config.ttl: 1000
       config.areasAnnotation: example.com/areas
       config.ipsAnnotation: example.com/ips
+      config.serviceAnnotation: example.com/dns
     asserts:
       - contains:
           path: spec.template.spec.containers[0].args
@@ -127,6 +128,9 @@ tests:
       - contains:
           path: spec.template.spec.containers[0].args
           content: --ips-annotation=example.com/ips
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --service-annotation=example.com/dns
 
   - it: should set custom capabilities in container security context
     asserts:

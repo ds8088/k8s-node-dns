@@ -52,10 +52,3 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "k8s-node-dns.serviceAccountName" -}}
   {{- default (include "k8s-node-dns.fullname" .) .Values.serviceAccount.name }}
 {{- end }}
-
-{{/*
-  Role and RoleBinding name for leader election.
-*/}}
-{{- define "k8s-node-dns.roleName" -}}
-  {{- include "k8s-node-dns.fullname" . }}-leader-election
-{{- end }}

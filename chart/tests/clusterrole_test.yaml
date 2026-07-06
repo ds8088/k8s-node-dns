@@ -20,7 +20,7 @@ tests:
       - notExists:
           path: metadata.namespace
 
-  - it: should grant get/list/watch on nodes resource
+  - it: should grant get/list/watch on nodes, services and endpointslices
     asserts:
       - equal:
           path: rules
@@ -29,6 +29,15 @@ tests:
                 - ""
               resources:
                 - nodes
+                - services
+              verbs:
+                - get
+                - list
+                - watch
+            - apiGroups:
+                - discovery.k8s.io
+              resources:
+                - endpointslices
               verbs:
                 - get
                 - list
