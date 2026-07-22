@@ -363,6 +363,128 @@ func TestDNSAreaReturnsIPs(t *testing.T) {
 	}
 }
 
+func TestDNSAreaFamilyPrefix(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore()
+	store.Update("node1", []string{"home"}, []netip.Addr{
+		netip.MustParseAddr("1.2.3.4"),
+		netip.MustParseAddr("2001:db8::1"),
+	}, true)
+
+	for _, test := range []struct {
+		title      string
+		name       string
+		qtype      uint16
+		expectedIP string
+	}{
+		{"v4 prefix, A query", "v4.home.example.com.", dns.TypeA, "1.2.3.4"},
+		{"v4 prefix, AAAA query", "v4.home.example.com.", dns.TypeAAAA, ""},
+		{"v6 prefix, AAAA query", "v6.home.example.com.", dns.TypeAAAA, "2001:db8::1"},
+		{"v6 prefix, A query", "v6.home.example.com.", dns.TypeA, ""},
+	} {
+		t.Run(test.title, func(t *testing.T) {
+			t.Parallel()
+
+			h := newTestHandler("example.com.", store)
+			resp := queryRoundtrip(t, h, test.qtype, test.name)
+
+			if resp.Rcode != dns.RcodeSuccess {
+				t.Errorf("unexpected DNS code: got %v, expected NOERROR", dns.RcodeToString[resp.Rcode])
+			}
+
+			if test.expectedIP == "" {
+				if len(resp.Answer) != 0 {
+					t.Errorf("expected NODATA, got %v answers", len(resp.Answer))
+				}
+
+				return
+			}
+
+			if len(resp.Answer) != 1 {
+				t.Fatalf("expected 1 answer, got %v", len(resp.Answer))
+			}
+
+			addr := ""
+			switch rr := resp.Answer[0].(type) {
+			case *dns.A:
+				addr = rr.Addr.String()
+			case *dns.AAAA:
+				addr = rr.Addr.String()
+			default:
+				t.Fatalf("unexpected record type %T", resp.Answer[0])
+			}
+
+			if addr != test.expectedIP {
+				t.Errorf("unexpected IP: got %v, want %v", addr, test.expectedIP)
+			}
+		})
+	}
+}
+
+func TestDNSServiceFamilyPrefix(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore()
+	store.Update("node1", nil, []netip.Addr{
+		netip.MustParseAddr("10.30.0.2"),
+		netip.MustParseAddr("2001:db8::2"),
+	}, true)
+	store.UpdateService(svcKey("default", "git"), []string{"node1"})
+
+	h := newTestHandler("example.com.", store)
+
+	respV4 := queryRoundtrip(t, h, dns.TypeA, "v4.git.default.example.com.")
+	if len(respV4.Answer) != 1 {
+		t.Fatalf("v4: expected 1 answer, got %v", len(respV4.Answer))
+	}
+
+	if a, ok := respV4.Answer[0].(*dns.A); !ok || a.Addr.String() != "10.30.0.2" {
+		t.Errorf("v4: unexpected answer: %v", respV4.Answer[0])
+	}
+
+	respV6 := queryRoundtrip(t, h, dns.TypeAAAA, "v6.git.default.example.com.")
+	if len(respV6.Answer) != 1 {
+		t.Fatalf("v6: expected 1 answer, got %v", len(respV6.Answer))
+	}
+
+	if aaaa, ok := respV6.Answer[0].(*dns.AAAA); !ok || aaaa.Addr.String() != "2001:db8::2" {
+		t.Errorf("v6: unexpected answer: %v", respV6.Answer[0])
+	}
+}
+
+func TestDNSFamilyPrefixUnknownArea(t *testing.T) {
+	t.Parallel()
+
+	h := newTestHandler("example.com.", NewStore())
+	resp := queryRoundtrip(t, h, dns.TypeA, "v4.home.example.com.")
+
+	if resp.Rcode != dns.RcodeNameError {
+		t.Errorf("unexpected DNS code: got %v, expected NXDOMAIN", dns.RcodeToString[resp.Rcode])
+	}
+}
+
+func TestDNSBareFamilyLabelIsArea(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore()
+	store.Update("node1", []string{"v4"}, []netip.Addr{
+		netip.MustParseAddr("1.2.3.4"),
+		netip.MustParseAddr("2001:db8::1"),
+	}, true)
+
+	h := newTestHandler("example.com.", store)
+	resp := queryRoundtrip(t, h, dns.TypeAAAA, "v4.example.com.")
+
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Errorf("unexpected DNS code: got %v, expected NOERROR", dns.RcodeToString[resp.Rcode])
+	}
+
+	if len(resp.Answer) != 1 {
+		t.Fatalf("expected 1 answer for area \"v4\", got %v", len(resp.Answer))
+	}
+}
+
 func TestDNSServiceReturnsIPs(t *testing.T) {
 	t.Parallel()
 

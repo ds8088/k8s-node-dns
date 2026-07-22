@@ -50,6 +50,20 @@ The controller can additionally track individual workloads by using annotated Se
 For zone `lb.pootis.network.` and an area `home`, querying `home.lb.pootis.network.` returns A/AAAA records for all ready nodes that list `home` in their areas annotation.
 The zone apex serves SOA and NS records.
 
+## IPv4/IPv6 records
+
+DNS records can also use an optional IP family prefix that restricts the answer to a single IP family:
+
+- `v4.<name>` resolves only to IPv4 (A) addresses;
+- `v6.<name>` resolves only to IPv6 (AAAA) addresses.
+
+For example, if `home.lb.pootis.network.` resolves to both an IPv4 and an IPv6 address, then:
+
+- `v4.home.lb.pootis.network.` returns only the IPv4 addresses;
+- `v6.home.lb.pootis.network.` returns only the IPv6 addresses;
+
+The prefix also works for Service records, for example, `v4.git.apps.lb.pootis.network.`.
+
 ## Service records
 
 The controller is capable of advertising a DNS record that tracks a workload (Deployment, StatefulSet and such) as it moves between nodes.
@@ -63,10 +77,11 @@ also taking node readiness into account.
 This works with any Service that has endpoints, even a headless Service, regardless of the workload behind it.
 
 Example:
-  - a single-replica Deployment is gated behind a Service `git` in namespace `apps`;
-  - a client queries `git.apps.lb.pootis.network.`;
-  - the DNS server returns the external IP of the node (or nodes, if there were multiple replicas) that currently run the pod,
-    and the DNS response becomes empty (NODATA) if there are no ready replicas anywhere.
+
+- a single-replica Deployment is gated behind a Service `git` in namespace `apps`;
+- a client queries `git.apps.lb.pootis.network.`;
+- the DNS server returns the external IP of the node (or nodes, if there were multiple replicas) that currently run the pod,
+  and the DNS response becomes empty (NODATA) if there are no ready replicas anywhere.
 
 The Service controller mirrors kube-proxy's terminating-endpoints behavior: if a Service has no ready endpoints,
 the controller tries to falls back to endpoints that are still serving while terminating (serving-terminating state),

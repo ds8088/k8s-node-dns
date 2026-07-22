@@ -184,11 +184,25 @@ func (h *dnsHandler) processDNSMessage(req, resp *dns.Msg) error {
 		return nil
 	}
 
-	// Strip the zone suffix and dispatch on the number of remaining labels:
-	//   - one label: "<area>" - this is an area record;
-	//   - two labels: "<service>.<ns>" - this is a Service record.
+	// Strip the zone suffix and split into labels.
 	sub := strings.TrimSuffix(qname, "."+h.cfg.Zone)
 	labels := strings.Split(sub, ".")
+
+	family := familyAny
+	if len(labels) > 1 {
+		switch labels[0] {
+		case "v4":
+			family = familyV4
+			labels = labels[1:]
+		case "v6":
+			family = familyV6
+			labels = labels[1:]
+		}
+	}
+
+	// Dispatch on the number of remaining labels:
+	//   - one label: "<area>" - this is an area record;
+	//   - two labels: "<service>.<ns>" - this is a Service record.
 	ips := []netip.Addr{}
 	known := false
 
@@ -213,8 +227,32 @@ func (h *dnsHandler) processDNSMessage(req, resp *dns.Msg) error {
 	}
 
 	// Name is known (but it may resolve to no IPs).
-	h.writeAddrAnswers(resp, name, qtype, ips)
+	h.writeAddrAnswers(resp, name, qtype, filterFamily(ips, family))
 	return nil
+}
+
+type ipFamily int
+
+const (
+	familyAny ipFamily = iota
+	familyV4
+	familyV6
+)
+
+// filterFamily filters the slice of IPs to match the requested address family.
+func filterFamily(ips []netip.Addr, family ipFamily) []netip.Addr {
+	if family == familyAny {
+		return ips
+	}
+
+	out := make([]netip.Addr, 0, len(ips))
+	for _, ip := range ips {
+		if (family == familyV4 && ip.Is4()) || (family == familyV6 && ip.Is6()) {
+			out = append(out, ip)
+		}
+	}
+
+	return out
 }
 
 // writeAddrAnswers builds the answer section for a known name that resolves to
